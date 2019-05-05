@@ -81,25 +81,9 @@ static void pm_qos_set_value(struct pm_qos_constraints *c, s32 value)
 	WRITE_ONCE(c->target_value, value);
 }
 
-/**
- * pm_qos_update_target - Update a list of PM QoS constraint requests.
- * @c: List of PM QoS requests.
- * @node: Target list entry.
- * @action: Action to carry out (add, update or remove).
- * @value: New request value for the target list entry.
- *
- * Update the given list of PM QoS constraint requests, @c, by carrying an
- * @action involving the @node list entry and @value on it.
- *
- * The recognized values of @action are PM_QOS_ADD_REQ (store @value in @node
- * and add it to the list), PM_QOS_UPDATE_REQ (remove @node from the list, store
- * @value in it and add it to the list again), and PM_QOS_REMOVE_REQ (remove
- * @node from the list, ignore @value).
- *
- * Return: 1 if the aggregate constraint value has changed, 0  otherwise.
- */
-int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
-			 enum pm_qos_req_action action, int value)
+static int __pm_qos_update_target(struct pm_qos_constraints *c,
+		struct plist_node *node, enum pm_qos_req_action action,
+		int value, bool *tightened)
 {
 	int prev_value, curr_value, new_value;
 	unsigned long flags;
@@ -134,6 +118,8 @@ int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
 
 	curr_value = pm_qos_get_value(c);
 	pm_qos_set_value(c, curr_value);
+	if (tightened)
+		*tightened = curr_value < prev_value;
 
 	spin_unlock_irqrestore(&pm_qos_lock, flags);
 
@@ -146,6 +132,29 @@ int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
 		blocking_notifier_call_chain(c->notifiers, curr_value, NULL);
 
 	return 1;
+}
+
+/**
+ * pm_qos_update_target - Update a list of PM QoS constraint requests.
+ * @c: List of PM QoS requests.
+ * @node: Target list entry.
+ * @action: Action to carry out (add, update or remove).
+ * @value: New request value for the target list entry.
+ *
+ * Update the given list of PM QoS constraint requests, @c, by carrying an
+ * @action involving the @node list entry and @value on it.
+ *
+ * The recognized values of @action are PM_QOS_ADD_REQ (store @value in @node
+ * and add it to the list), PM_QOS_UPDATE_REQ (remove @node from the list, store
+ * @value in it and add it to the list again), and PM_QOS_REMOVE_REQ (remove
+ * @node from the list, ignore @value).
+ *
+ * Return: 1 if the aggregate constraint value has changed, 0  otherwise.
+ */
+int pm_qos_update_target(struct pm_qos_constraints *c, struct plist_node *node,
+			 enum pm_qos_req_action action, int value)
+{
+	return __pm_qos_update_target(c, node, action, value, NULL);
 }
 
 /**
@@ -247,8 +256,10 @@ EXPORT_SYMBOL_GPL(cpu_latency_qos_request_active);
 static void cpu_latency_qos_apply(struct pm_qos_request *req,
 				  enum pm_qos_req_action action, s32 value)
 {
-	int ret = pm_qos_update_target(req->qos, &req->node, action, value);
-	if (ret > 0)
+	bool tightened;
+
+	__pm_qos_update_target(req->qos, &req->node, action, value, &tightened);
+	if (tightened)
 		wake_up_all_idle_cpus();
 }
 
