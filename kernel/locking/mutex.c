@@ -572,11 +572,16 @@ bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner,
 	int cnt = 0;
 	bool time_out = false;
 
-	rcu_read_lock();
-	while (__mutex_owner(lock) == owner) {
+	for (;;) {
+		rcu_read_lock();
+		if (__mutex_owner(lock) != owner) {
+			rcu_read_unlock();
+			break;
+		}
 		trace_android_vh_mutex_opt_spin_start(lock, &time_out, &cnt);
 		if (time_out) {
 			ret = false;
+			rcu_read_unlock();
 			break;
 		}
 		/*
@@ -593,17 +598,19 @@ bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner,
 		if (!owner->on_cpu || need_resched() ||
 				vcpu_is_preempted(task_cpu(owner))) {
 			ret = false;
+			rcu_read_unlock();
 			break;
 		}
 
 		if (ww_ctx && !ww_mutex_spin_on_owner(lock, ww_ctx, waiter)) {
 			ret = false;
+			rcu_read_unlock();
 			break;
 		}
 
+		rcu_read_unlock();
 		cpu_relax();
 	}
-	rcu_read_unlock();
 
 	return ret;
 }
