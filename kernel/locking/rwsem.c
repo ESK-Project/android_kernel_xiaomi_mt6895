@@ -730,11 +730,13 @@ rwsem_spin_on_owner(struct rw_semaphore *sem, unsigned long nonspinnable)
 	if (state != OWNER_WRITER)
 		return state;
 
-	rcu_read_lock();
 	for (;;) {
+		rcu_read_lock();
 		trace_android_vh_rwsem_opt_spin_start(sem, &time_out, &cnt, true);
-		if (time_out)
+		if (time_out) {
+			rcu_read_unlock();
 			break;
+		}
 		/*
 		 * When a waiting writer set the handoff flag, it may spin
 		 * on the owner as well. Once that writer acquires the lock,
@@ -744,6 +746,7 @@ rwsem_spin_on_owner(struct rw_semaphore *sem, unsigned long nonspinnable)
 		new = rwsem_owner_flags(sem, &new_flags);
 		if ((new != owner) || (new_flags != flags)) {
 			state = rwsem_owner_state(new, new_flags, nonspinnable);
+			rcu_read_unlock();
 			break;
 		}
 
@@ -757,12 +760,13 @@ rwsem_spin_on_owner(struct rw_semaphore *sem, unsigned long nonspinnable)
 
 		if (need_resched() || !owner_on_cpu(owner)) {
 			state = OWNER_NONSPINNABLE;
+			rcu_read_unlock();
 			break;
 		}
 
+		rcu_read_unlock();
 		cpu_relax();
 	}
-	rcu_read_unlock();
 
 	return state;
 }
