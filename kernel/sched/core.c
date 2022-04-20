@@ -3125,12 +3125,10 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 * A similar smb_rmb() lives in try_invoke_on_locked_down_task().
 	 */
 	smp_rmb();
-	if (READ_ONCE(p->on_rq) && ttwu_runnable(p, wake_flags))
-		goto unlock;
-
-	if (p->state & TASK_UNINTERRUPTIBLE)
-		trace_sched_blocked_reason(p);
-
+	if (READ_ONCE(p->on_rq)) {
+		if (ttwu_runnable(p, wake_flags))
+			goto unlock;
+	} else {
 #ifdef CONFIG_SMP
 	/*
 	 * Ensure we load p->on_cpu _after_ p->on_rq, otherwise it would be
@@ -3156,7 +3154,13 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 * care about it's own p->state. See the comment in __schedule().
 	 */
 	smp_acquire__after_ctrl_dep();
+#endif
+	}
 
+	if (p->state & TASK_UNINTERRUPTIBLE)
+		trace_sched_blocked_reason(p);
+
+#ifdef CONFIG_SMP
 	/*
 	 * We're doing the wakeup (@success == 1), they did a dequeue (p->on_rq
 	 * == 0), which means we need to do an enqueue, change p->state to
