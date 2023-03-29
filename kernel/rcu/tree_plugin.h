@@ -2348,7 +2348,7 @@ lazy_rcu_shrink_scan(struct shrinker *shrink, struct shrink_control *sc)
 		if (_count == 0)
 			continue;
 		rcu_nocb_lock_irqsave(rdp, flags);
-		WRITE_ONCE(rdp->lazy_len, 0);
+		WARN_ON_ONCE(!rcu_nocb_flush_bypass(rdp, NULL, jiffies, false));
 		wake_nocb_gp(rdp, false, flags);
 		sc->nr_to_scan -= _count;
 		count += _count;
