@@ -984,7 +984,7 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se);
  */
 static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	unsigned long slice = sysctl_sched_base_slice;
+	unsigned long slice = se->custom_slice ? se->slice : sysctl_sched_base_slice;
 	u64 delta_exec;
 	bool skip_preempt = false;
 
@@ -4674,7 +4674,8 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	u64 vslice, vruntime = avg_vruntime(cfs_rq);
 	s64 lag = 0;
 
-	se->slice = sysctl_sched_base_slice;
+	if (!se->custom_slice)
+		se->slice = sysctl_sched_base_slice;
 	vslice = calc_delta_fair(se->slice, se);
 
 	/*
