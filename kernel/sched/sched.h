@@ -1137,6 +1137,19 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
 #define raw_rq()		raw_cpu_ptr(&runqueues)
 
+/* runqueue on which this entity is (to be) queued */
+static inline struct cfs_rq *cfs_rq_of(struct sched_entity *se)
+{
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	return se->cfs_rq;
+#else
+	struct task_struct *p = container_of(se, struct task_struct, se);
+	struct rq *rq = task_rq(p);
+
+	return &rq->cfs;
+#endif
+}
+
 extern void update_rq_clock(struct rq *rq);
 
 static inline u64 __rq_clock_broken(struct rq *rq)
@@ -2803,3 +2816,4 @@ static inline bool task_may_not_preempt(struct task_struct *task, int cpu)
 #endif /* CONFIG_RT_SOFTINT_OPTIMIZATION */
 
 extern u64 avg_vruntime(struct cfs_rq *cfs_rq);
+extern int entity_eligible(struct cfs_rq *cfs_rq, struct sched_entity *se);
