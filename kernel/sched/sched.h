@@ -2094,6 +2094,9 @@ extern void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags);
 extern const_debug unsigned int sysctl_sched_nr_migrate;
 extern const_debug unsigned int sysctl_sched_migration_cost;
 
+/* Internal EEVDF name; preserve the Android 5.10 exported ABI symbol. */
+#define sysctl_sched_base_slice sysctl_sched_min_granularity
+
 #ifdef CONFIG_SCHED_HRTICK
 
 /*
