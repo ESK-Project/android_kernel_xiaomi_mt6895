@@ -469,8 +469,9 @@ struct sched_entity {
 
 	u64				exec_start;
 	u64				sum_exec_runtime;
-	u64				vruntime;
 	u64				prev_sum_exec_runtime;
+	u64				vruntime;
+	s64				vlag;
 
 	u64				nr_migrations;
 
@@ -496,11 +497,6 @@ struct sched_entity {
 	 */
 	struct sched_avg		avg;
 #endif
-
-	ANDROID_KABI_RESERVE(1);
-	ANDROID_KABI_RESERVE(2);
-	ANDROID_KABI_RESERVE(3);
-	ANDROID_KABI_RESERVE(4);
 };
 
 struct sched_rt_entity {
