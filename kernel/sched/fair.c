@@ -58,7 +58,7 @@ static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 enum sched_tunable_scaling sysctl_sched_tunable_scaling = SCHED_TUNABLESCALING_LOG;
 
 /*
- * Minimal preemption granularity for CPU-bound tasks:
+ * EEVDF base request slice. Keep the Android 5.10 public symbol name:
  *
  * (default: 0.75 msec * (1 + ilog(ncpus)), units: nanoseconds)
  */
@@ -933,7 +933,7 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se);
  */
 static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	unsigned long slice = sysctl_sched_min_granularity;
+	unsigned long slice = sysctl_sched_base_slice;
 	u64 delta_exec;
 	bool skip_preempt = false;
 
@@ -943,7 +943,7 @@ static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	/*
 	 * For EEVDF the virtual time slope is determined by w_i (iow.
 	 * nice) while the request time r_i is determined by
-	 * sysctl_sched_min_granularity.
+	 * sysctl_sched_base_slice.
 	 */
 	delta_exec = se->sum_exec_runtime - se->prev_sum_exec_runtime;
 	trace_android_rvh_check_preempt_tick(current, &slice, &skip_preempt,
