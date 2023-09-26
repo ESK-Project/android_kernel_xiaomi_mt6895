@@ -8,6 +8,7 @@ SCHED_FEAT(PLACE_LAG, true)
 SCHED_FEAT(PLACE_DEADLINE_INITIAL, true)
 SCHED_FEAT(PLACE_REL_DEADLINE, true)
 SCHED_FEAT(RUN_TO_PARITY, true)
+SCHED_FEAT(PREEMPT_SHORT, true)
 
 /*
  * Prefer to schedule the task we woke last (assuming it failed
