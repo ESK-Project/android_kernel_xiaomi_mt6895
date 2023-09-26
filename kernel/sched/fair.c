@@ -1014,18 +1014,18 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se);
  * XXX: strictly: vd_i += N*r_i/w_i such that: vd_i > ve_i
  * this is probably good enough.
  */
-static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static bool update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se,
+			    bool *skip_preempt)
 {
 	unsigned long slice = se->custom_slice ? se->slice : sysctl_sched_base_slice;
 	u64 delta_exec;
-	bool skip_preempt = false;
 
-	trace_android_rvh_update_deadline(cfs_rq, se, &skip_preempt);
-	if (skip_preempt)
-		return;
+	trace_android_rvh_update_deadline(cfs_rq, se, skip_preempt);
+	if (*skip_preempt)
+		return false;
 
 	if ((s64)(se->vruntime - se->deadline) < 0)
-		return;
+		return false;
 
 	/*
 	 * For EEVDF the virtual time slope is determined by w_i (iow.
@@ -1033,7 +1033,7 @@ static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	 * sysctl_sched_base_slice.
 	 */
 	delta_exec = se->sum_exec_runtime - se->prev_sum_exec_runtime;
-	trace_android_rvh_check_preempt_tick(current, &slice, &skip_preempt,
+	trace_android_rvh_check_preempt_tick(current, &slice, skip_preempt,
 			delta_exec, cfs_rq, se, sysctl_sched_min_granularity);
 	se->slice = slice;
 
@@ -1045,10 +1045,7 @@ static void update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	/*
 	 * The task has consumed its request, reschedule.
 	 */
-	if (cfs_rq->nr_running > 1 && !skip_preempt) {
-		resched_curr(rq_of(cfs_rq));
-		clear_buddies(cfs_rq, se);
-	}
+	return true;
 }
 
 #include "pelt.h"
@@ -1162,11 +1159,45 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq)
 /*
  * Update the current task's runtime statistics.
  */
+static inline bool did_preempt_short(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+{
+	if (!sched_feat(PREEMPT_SHORT))
+		return false;
+
+	if (curr->vlag == curr->deadline)
+		return false;
+
+	return !entity_eligible(cfs_rq, curr);
+}
+
+static inline bool do_preempt_short(struct cfs_rq *cfs_rq,
+				    struct sched_entity *pse, struct sched_entity *se)
+{
+	if (!sched_feat(PREEMPT_SHORT))
+		return false;
+
+	if (pse->slice >= se->slice)
+		return false;
+
+	if (!entity_eligible(cfs_rq, pse))
+		return false;
+
+	if (entity_before(pse, se))
+		return true;
+
+	if (!entity_eligible(cfs_rq, se))
+		return true;
+
+	return false;
+}
+
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
-	u64 now = rq_clock_task(rq_of(cfs_rq));
+	struct rq *rq = rq_of(cfs_rq);
+	u64 now = rq_clock_task(rq);
 	u64 delta_exec;
+	bool resched, skip_preempt = false;
 
 	if (unlikely(!curr))
 		return;
@@ -1184,7 +1215,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
-	update_deadline(cfs_rq, curr);
+	resched = update_deadline(cfs_rq, curr, &skip_preempt);
 	update_min_vruntime(cfs_rq);
 
 	if (entity_is_task(curr)) {
@@ -1196,6 +1227,14 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	}
 
 	account_cfs_rq_runtime(cfs_rq, delta_exec);
+
+	if (cfs_rq->nr_running == 1 || skip_preempt)
+		return;
+
+	if (resched || did_preempt_short(cfs_rq, curr)) {
+		resched_curr(rq);
+		clear_buddies(cfs_rq, curr);
+	}
 }
 
 static void update_curr_fair(struct rq *rq)
@@ -7807,9 +7846,9 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (nopreempt)
 		return;
 
-	/*
-	 * XXX pick_eevdf(cfs_rq) != se ?
-	 */
+	if (do_preempt_short(cfs_rq, pse, se) && se->vlag == se->deadline)
+		se->vlag = se->deadline + 1;
+
 	if (pick_eevdf(cfs_rq) == pse)
 		goto preempt;
 
