@@ -561,9 +561,10 @@ static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
 void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 {
 	s64 MIN_vruntime = -1, min_vruntime, max_vruntime = -1,
+		left_deadline = -1,
 		spread, rq0_min_vruntime, spread0;
 	struct rq *rq = cpu_rq(cpu);
-	struct sched_entity *last;
+	struct sched_entity *first, *last, *root;
 	unsigned long flags;
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -577,14 +578,20 @@ void print_cfs_rq(struct seq_file *m, int cpu, struct cfs_rq *cfs_rq)
 			SPLIT_NS(cfs_rq->exec_clock));
 
 	raw_spin_lock_irqsave(&rq->lock, flags);
-	if (rb_first_cached(&cfs_rq->tasks_timeline))
-		MIN_vruntime = (__pick_first_entity(cfs_rq))->vruntime;
+	root = __pick_root_entity(cfs_rq);
+	if (root)
+		MIN_vruntime = root->min_vruntime;
+	first = __pick_first_entity(cfs_rq);
+	if (first)
+		left_deadline = first->deadline;
 	last = __pick_last_entity(cfs_rq);
 	if (last)
 		max_vruntime = last->vruntime;
 	min_vruntime = cfs_rq->min_vruntime;
 	rq0_min_vruntime = cpu_rq(0)->cfs.min_vruntime;
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
+	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "left_deadline",
+			SPLIT_NS(left_deadline));
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "MIN_vruntime",
 			SPLIT_NS(MIN_vruntime));
 	SEQ_printf(m, "  .%-30s: %Ld.%06ld\n", "min_vruntime",
