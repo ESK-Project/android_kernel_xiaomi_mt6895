@@ -230,6 +230,7 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_iommu_free_iova);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_iommu_iovad_free_iova);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_pick_next_entity);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_check_preempt_wakeup);
+EXPORT_TRACEPOINT_SYMBOL_GPL(android_rvh_update_deadline);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_cma_alloc_start);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_cma_alloc_finish);
 EXPORT_TRACEPOINT_SYMBOL_GPL(android_vh_rmqueue);
