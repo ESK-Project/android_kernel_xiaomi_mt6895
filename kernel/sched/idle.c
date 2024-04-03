@@ -474,7 +474,7 @@ struct task_struct *pick_next_task_idle(struct rq *rq)
  * It is not legal to sleep in the idle task - print a warning
  * message if some code attempts to do it:
  */
-static void
+static bool
 dequeue_task_idle(struct rq *rq, struct task_struct *p, int flags)
 {
 	raw_spin_unlock_irq(&rq->lock);
@@ -483,6 +483,7 @@ dequeue_task_idle(struct rq *rq, struct task_struct *p, int flags)
 	trace_android_rvh_dequeue_task_idle(p);
 	dump_stack();
 	raw_spin_lock_irq(&rq->lock);
+	return true;
 }
 
 /*
