@@ -6034,6 +6034,7 @@ static void requeue_delayed_entity(struct sched_entity *se)
 		}
 	}
 
+	update_load_avg(cfs_rq, se, 0);
 	se->sched_delayed = 0;
 }
 
