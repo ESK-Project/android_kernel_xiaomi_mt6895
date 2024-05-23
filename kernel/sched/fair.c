@@ -4877,6 +4877,13 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 
+static inline void finish_delayed_dequeue_entity(struct sched_entity *se)
+{
+	se->sched_delayed = 0;
+	if (sched_feat(DELAY_ZERO) && se->vlag > 0)
+		se->vlag = 0;
+}
+
 static void
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
@@ -4919,6 +4926,9 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 */
 	if ((flags & (DEQUEUE_SAVE | DEQUEUE_MOVE)) != DEQUEUE_SAVE)
 		update_min_vruntime(cfs_rq);
+
+	if (flags & DEQUEUE_DELAYED)
+		finish_delayed_dequeue_entity(se);
 }
 
 void set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -5993,6 +6003,8 @@ static int sched_idle_cpu(int cpu)
 
 static void requeue_delayed_entity(struct sched_entity *se)
 {
+	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+
 	/*
 	 * se->sched_delayed should imply: se->on_rq == 1.
 	 * Because a delayed entity is one that is still on
@@ -6000,6 +6012,20 @@ static void requeue_delayed_entity(struct sched_entity *se)
 	 */
 	SCHED_WARN_ON(!se->sched_delayed);
 	SCHED_WARN_ON(!se->on_rq);
+
+	if (sched_feat(DELAY_ZERO)) {
+		update_entity_lag(cfs_rq, se);
+		if (se->vlag > 0) {
+			cfs_rq->nr_running--;
+			if (se != cfs_rq->curr)
+				__dequeue_entity(cfs_rq, se);
+			se->vlag = 0;
+			place_entity(cfs_rq, se, 0);
+			if (se != cfs_rq->curr)
+				__enqueue_entity(cfs_rq, se);
+			cfs_rq->nr_running++;
+		}
+	}
 
 	se->sched_delayed = 0;
 }
