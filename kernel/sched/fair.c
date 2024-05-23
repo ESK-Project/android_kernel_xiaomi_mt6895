@@ -4958,6 +4958,7 @@ void set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 EXPORT_SYMBOL_GPL(set_next_entity);
 
+static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags);
 
 /*
  * Pick the next process, keeping these things in mind, in this order:
@@ -4967,24 +4968,36 @@ EXPORT_SYMBOL_GPL(set_next_entity);
  * 4) do not run the "skip" process, if something else is available
  */
 static struct sched_entity *
-pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+pick_next_entity(struct rq *rq, struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	struct sched_entity *se = NULL;
 
 	trace_android_rvh_pick_next_entity(cfs_rq, curr, &se);
 	if (se) {
 		clear_buddies(cfs_rq, se);
-		return se;
+		goto picked;
 	}
 
 	/*
 	 * Enabling NEXT_BUDDY will affect latency but not fairness.
 	 */
 	if (sched_feat(NEXT_BUDDY) &&
-	    cfs_rq->next && entity_eligible(cfs_rq, cfs_rq->next))
-		return cfs_rq->next;
+	    cfs_rq->next && entity_eligible(cfs_rq, cfs_rq->next)) {
+		/* ->next will never be delayed */
+		SCHED_WARN_ON(cfs_rq->next->sched_delayed);
+		se = cfs_rq->next;
+	} else {
+		se = pick_eevdf(cfs_rq);
+	}
 
-	return pick_eevdf(cfs_rq);
+picked:
+	if (se && se->sched_delayed) {
+		dequeue_entities(rq, se, DEQUEUE_SLEEP | DEQUEUE_DELAYED);
+		SCHED_WARN_ON(se->sched_delayed);
+		SCHED_WARN_ON(se->on_rq);
+		return NULL;
+	}
+	return se;
 }
 
 static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq);
@@ -7570,7 +7583,9 @@ again:
 		if (unlikely(check_cfs_rq_runtime(cfs_rq)))
 			goto again;
 
-		se = pick_next_entity(cfs_rq, curr);
+		se = pick_next_entity(rq, cfs_rq, curr);
+		if (!se)
+			goto again;
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
