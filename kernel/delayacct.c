@@ -56,9 +56,9 @@ static void delayacct_end(raw_spinlock_t *lock, u64 *start, u64 *total,
 	}
 }
 
-void __delayacct_blkio_start(void)
+void __delayacct_blkio_start(struct task_struct *p)
 {
-	current->delays->blkio_start = ktime_get_ns();
+	p->delays->blkio_start = ktime_get_ns();
 }
 
 /*
