@@ -21,6 +21,9 @@ SCHED_FEAT(NEXT_BUDDY, false)
  */
 SCHED_FEAT(CACHE_HOT_BUDDY, true)
 
+/* Clip delayed entity lag on dequeue or wakeup to zero. */
+SCHED_FEAT(DELAY_ZERO, true)
+
 /*
  * Allow wakeup-time preemption of the current task:
  */
