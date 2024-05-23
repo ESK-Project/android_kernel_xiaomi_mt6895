@@ -4930,7 +4930,7 @@ static inline void finish_delayed_dequeue_entity(struct sched_entity *se)
 		se->vlag = 0;
 }
 
-static void
+static bool
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	/*
@@ -4938,6 +4938,24 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 */
 	update_curr(cfs_rq);
 	clear_buddies(cfs_rq, se);
+
+	if (flags & DEQUEUE_DELAYED) {
+		SCHED_WARN_ON(!se->sched_delayed);
+	} else {
+		bool delay = flags & DEQUEUE_SLEEP;
+
+		/* Special task states must not suffer spurious wakeups. */
+		if (flags & DEQUEUE_SPECIAL)
+			delay = false;
+
+		SCHED_WARN_ON(delay && se->sched_delayed);
+		if (sched_feat(DELAY_DEQUEUE) && delay &&
+		    !entity_eligible(cfs_rq, se)) {
+			update_load_avg(cfs_rq, se, 0);
+			set_delayed(se);
+			return false;
+		}
+	}
 
 	/*
 	 * When dequeuing a sched_entity, we must:
@@ -4974,6 +4992,8 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	if (flags & DEQUEUE_DELAYED)
 		finish_delayed_dequeue_entity(se);
+
+	return true;
 }
 
 void set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
@@ -5356,7 +5376,11 @@ static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 			break;
 
 		if (dequeue) {
-			dequeue_entity(qcfs_rq, se, DEQUEUE_SLEEP);
+			int flags = DEQUEUE_SLEEP | DEQUEUE_SPECIAL;
+
+			if (se->sched_delayed)
+				flags |= DEQUEUE_DELAYED;
+			dequeue_entity(qcfs_rq, se, flags);
 		} else {
 			update_load_avg(qcfs_rq, se, 0);
 			se_update_runnable(se);
@@ -6232,7 +6256,8 @@ static void set_next_buddy(struct sched_entity *se);
  *  0 - dequeue throttled
  *  1 - dequeue complete
  */
-static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
+static int __dequeue_entities(struct rq *rq, struct sched_entity *se,
+			      int flags, bool block)
 {
 	bool was_sched_idle = sched_idle_rq(rq);
 	bool task_sleep = flags & DEQUEUE_SLEEP;
@@ -6242,6 +6267,7 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 	int h_nr_running = 0;
 	int h_nr_delayed = 0;
 	struct cfs_rq *cfs_rq;
+	int ret = 0;
 
 	if (entity_is_task(se)) {
 		p = task_of(se);
@@ -6253,7 +6279,11 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
-		dequeue_entity(cfs_rq, se, flags);
+		if (!dequeue_entity(cfs_rq, se, flags)) {
+			if (p && &p->se == se)
+				return -1;
+			break;
+		}
 
 		cfs_rq->h_nr_running -= h_nr_running;
 		if (!h_nr_delayed)
@@ -6263,7 +6293,7 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 
 		/* end evaluation on encountering a throttled cfs_rq */
 		if (cfs_rq_throttled(cfs_rq))
-			return 0;
+			goto out;
 
 		/* Don't dequeue parent if it has other entities besides us */
 		if (cfs_rq->load.weight) {
@@ -6278,6 +6308,7 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 			break;
 		}
 		flags |= DEQUEUE_SLEEP;
+		flags &= ~(DEQUEUE_DELAYED | DEQUEUE_SPECIAL);
 	}
 
 	if (p)
@@ -6297,7 +6328,7 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 
 		/* end evaluation on encountering a throttled cfs_rq */
 		if (cfs_rq_throttled(cfs_rq))
-			return 0;
+			goto out;
 
 	}
 
@@ -6307,7 +6338,24 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
 	if (unlikely(!was_sched_idle && sched_idle_rq(rq)))
 		rq->next_balance = jiffies;
 
-	return 1;
+	ret = 1;
+out:
+	if (p && task_delayed) {
+		SCHED_WARN_ON(!task_sleep);
+		SCHED_WARN_ON(p->on_rq != TASK_ON_RQ_QUEUED);
+		hrtick_update(rq);
+		/* Core dispatch must run its after-dequeue hook before release. */
+		if (block)
+			__block_task(rq, p);
+	}
+
+	/* No task/entity access after the release in __block_task(). */
+	return ret;
+}
+
+static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
+{
+	return __dequeue_entities(rq, se, flags, true);
 }
 
 /*
@@ -6321,7 +6369,7 @@ static bool dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		util_est_dequeue(&rq->cfs, p);
 
 	util_est_update(&rq->cfs, p, flags & DEQUEUE_SLEEP);
-	if (dequeue_entities(rq, &p->se, flags) < 0)
+	if (__dequeue_entities(rq, &p->se, flags, false) < 0)
 		return false;
 
 	hrtick_update(rq);
@@ -7726,6 +7774,30 @@ again:
 	return task_of(se);
 }
 
+static bool entity_path_delayed(struct sched_entity *se)
+{
+	for_each_sched_entity(se) {
+		if (se->sched_delayed)
+			return true;
+	}
+	return false;
+}
+
+static void replace_next_task_fair(struct rq *rq, struct task_struct **p,
+				   struct sched_entity **se, bool *repick,
+				   bool simple, struct task_struct *prev)
+{
+	struct task_struct *next = *p;
+	struct sched_entity *next_se = *se;
+
+	trace_android_rvh_replace_next_task_fair(rq, p, se, repick, simple, prev);
+	if (!*p || !*se || entity_path_delayed(&(*p)->se) || entity_path_delayed(*se)) {
+		*p = next;
+		*se = next_se;
+		*repick = false;
+	}
+}
+
 struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 {
@@ -7752,7 +7824,7 @@ again:
 	 * hierarchy, only change the part that actually changes.
 	 */
 
-	trace_android_rvh_replace_next_task_fair(rq, &p, &se, &repick, false, prev);
+	replace_next_task_fair(rq, &p, &se, &repick, false, prev);
 	/*
 	 * Since we haven't yet done put_prev_entity and if the selected task
 	 * is a different task than we started out with, try and touch the
@@ -7786,7 +7858,7 @@ simple:
 	if (prev)
 		put_prev_task(rq, prev);
 
-	trace_android_rvh_replace_next_task_fair(rq, &p, &se, &repick, true, prev);
+	replace_next_task_fair(rq, &p, &se, &repick, true, prev);
 	for_each_sched_entity(se)
 		set_next_entity(cfs_rq_of(se), se);
 
@@ -11568,6 +11640,9 @@ static void switched_to_fair(struct rq *rq, struct task_struct *p)
 static void set_next_task_fair(struct rq *rq, struct task_struct *p, bool first)
 {
 	struct sched_entity *se = &p->se;
+
+	if (first)
+		SCHED_WARN_ON(se->sched_delayed);
 
 #ifdef CONFIG_SMP
 	if (task_on_rq_queued(p)) {

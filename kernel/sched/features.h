@@ -24,6 +24,9 @@ SCHED_FEAT(CACHE_HOT_BUDDY, true)
 /* Clip delayed entity lag on dequeue or wakeup to zero. */
 SCHED_FEAT(DELAY_ZERO, true)
 
+/* Keep non-eligible sleepers queued until they are picked or woken. */
+SCHED_FEAT(DELAY_DEQUEUE, true)
+
 /*
  * Allow wakeup-time preemption of the current task:
  */
