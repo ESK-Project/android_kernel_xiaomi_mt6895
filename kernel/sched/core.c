@@ -1704,6 +1704,8 @@ EXPORT_SYMBOL_GPL(activate_task);
 
 void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
 {
+	SCHED_WARN_ON(flags & DEQUEUE_SLEEP);
+
 	WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 
@@ -2774,6 +2776,8 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 	if (task_on_rq_queued(p)) {
 		/* check_preempt_curr() may use rq clock */
 		update_rq_clock(rq);
+		if (p->se.sched_delayed)
+			enqueue_task(rq, p, ENQUEUE_NOCLOCK | ENQUEUE_DELAYED);
 		ttwu_do_wakeup(rq, p, wake_flags, &rf);
 		ret = 1;
 	}
@@ -3076,11 +3080,15 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 		 * case the whole 'p->on_rq && ttwu_runnable()' case below
 		 * without taking any locks.
 		 *
+		 * Current has not reached block_task() yet, so it cannot be
+		 * sched_delayed.
+		 *
 		 * In particular:
 		 *  - we rely on Program-Order guarantees for all the ordering,
 		 *  - we're serialized against set_special_state() by virtue of
 		 *    it disabling IRQs (this allows not taking ->pi_lock).
 		 */
+		SCHED_WARN_ON(p->se.sched_delayed);
 		if (!(p->state & state))
 			goto out;
 
@@ -3337,6 +3345,9 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.vlag			= 0;
 	p->se.slice			= sysctl_sched_base_slice;
 	INIT_LIST_HEAD(&p->se.group_node);
+
+	/* A delayed task cannot be in clone(). */
+	SCHED_WARN_ON(p->se.sched_delayed);
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	p->se.cfs_rq			= NULL;
