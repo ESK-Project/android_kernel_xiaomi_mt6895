@@ -4762,6 +4762,12 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 
 	se->vruntime = vruntime - lag;
 
+	if (sched_feat(PLACE_REL_DEADLINE) && se->rel_deadline) {
+		se->deadline += se->vruntime;
+		se->rel_deadline = 0;
+		goto placed;
+	}
+
 	/*
 	 * When joining the competition; the exisiting tasks will be,
 	 * on average, halfway through their slice, as such start tasks
@@ -4774,6 +4780,7 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	 * EEVDF: vd_i = ve_i + r_i/w_i
 	 */
 	se->deadline = se->vruntime + vslice;
+placed:
 	trace_android_rvh_place_entity(cfs_rq, se, initial, vruntime);
 }
 
@@ -4940,6 +4947,8 @@ static inline void finish_delayed_dequeue_entity(struct sched_entity *se)
 static bool
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
+	bool sleep = flags & DEQUEUE_SLEEP;
+
 	/*
 	 * Update run-time statistics of the 'current'.
 	 */
@@ -4949,7 +4958,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	if (flags & DEQUEUE_DELAYED) {
 		SCHED_WARN_ON(!se->sched_delayed);
 	} else {
-		bool delay = flags & DEQUEUE_SLEEP;
+		bool delay = sleep;
 
 		/* Special task states must not suffer spurious wakeups. */
 		if (flags & DEQUEUE_SPECIAL)
@@ -4978,6 +4987,11 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	update_stats_dequeue(cfs_rq, se, flags);
 
 	update_entity_lag(cfs_rq, se);
+	if (sched_feat(PLACE_REL_DEADLINE) && !sleep) {
+		se->deadline -= se->vruntime;
+		se->rel_deadline = 1;
+	}
+
 	if (se != cfs_rq->curr)
 		__dequeue_entity(cfs_rq, se);
 	se->on_rq = 0;
