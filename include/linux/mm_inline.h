@@ -284,6 +284,13 @@ static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bo
 	return true;
 }
 
+static inline void page_migrate_refs(struct page *newpage, struct page *page)
+{
+	unsigned long refs = READ_ONCE(page->flags) & LRU_REFS_MASK;
+
+	set_mask_bits(&newpage->flags, LRU_REFS_MASK, refs);
+}
+
 #else /* !CONFIG_LRU_GEN */
 
 static inline bool lru_gen_enabled(void)
@@ -304,6 +311,10 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
 static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bool reclaiming)
 {
 	return false;
+}
+
+static inline void page_migrate_refs(struct page *newpage, struct page *page)
+{
 }
 
 #endif /* CONFIG_LRU_GEN */
