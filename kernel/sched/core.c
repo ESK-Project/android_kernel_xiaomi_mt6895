@@ -1690,7 +1690,7 @@ static inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 	if (!(flags & DEQUEUE_NOCLOCK))
 		update_rq_clock(rq);
 
-	if (!(flags & DEQUEUE_SAVE)) {
+	if (!(flags & (DEQUEUE_SAVE | DEQUEUE_DELAYED))) {
 		sched_info_dequeued(rq, p);
 		psi_dequeue(p, !(flags & DEQUEUE_SLEEP));
 	}
@@ -4736,6 +4736,7 @@ restart:
 static void __sched notrace __schedule(bool preempt)
 {
 	struct task_struct *prev, *next;
+	bool block = false;
 	unsigned long *switch_count;
 	unsigned long prev_state;
 	struct rq_flags rf;
@@ -4812,6 +4813,7 @@ static void __sched notrace __schedule(bool preempt)
 			 * After this, schedule() must not care about p->state any more.
 			 */
 			block_task(rq, prev, flags);
+			block = true;
 		}
 		switch_count = &prev->nvcsw;
 	}
@@ -4844,7 +4846,7 @@ static void __sched notrace __schedule(bool preempt)
 		 */
 		++*switch_count;
 
-		psi_sched_switch(prev, next, !task_on_rq_queued(prev));
+		psi_sched_switch(prev, next, block);
 
 		trace_sched_switch(preempt, prev, next);
 
