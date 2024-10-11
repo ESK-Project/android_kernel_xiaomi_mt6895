@@ -59,39 +59,46 @@ static inline void rq_sched_info_depart  (struct rq *rq, unsigned long long delt
 /*
  * PSI tracks state that persists across sleeps, such as iowaits and
  * memory stalls. As a result, it has to distinguish between sleeps,
- * where a task's runnable state changes, and requeues, where a task
- * and its state are being moved between CPUs and runqueues.
+ * where a task's runnable state changes, and migrations, where a task
+ * and its state are being moved between CPUs and runqueues. Delayed
+ * tasks are queued but asleep, so migrate their sleep-persistent state.
  */
-static inline void psi_enqueue(struct task_struct *p, bool wakeup)
+static inline void psi_enqueue(struct task_struct *p, bool migrate)
 {
-	int clear = 0, set = TSK_RUNNING;
+	int clear = 0, set = 0;
 
 	if (static_branch_likely(&psi_disabled))
 		return;
 
-	if (!wakeup || p->sched_psi_wake_requeue) {
+	if (p->se.sched_delayed) {
+		SCHED_WARN_ON(!migrate);
 		if (p->in_memstall)
 			set |= TSK_MEMSTALL;
-		if (p->sched_psi_wake_requeue)
-			p->sched_psi_wake_requeue = 0;
-	} else {
 		if (p->in_iowait)
+			set |= TSK_IOWAIT;
+	} else {
+		set = TSK_RUNNING;
+		if (migrate || p->sched_psi_wake_requeue) {
+			if (p->in_memstall)
+				set |= TSK_MEMSTALL;
+			p->sched_psi_wake_requeue = 0;
+		} else if (p->in_iowait) {
 			clear |= TSK_IOWAIT;
+		}
 	}
 
 	psi_task_change(p, clear, set);
 }
 
-static inline void psi_dequeue(struct task_struct *p, bool sleep)
+static inline void psi_dequeue(struct task_struct *p, bool migrate)
 {
 	int clear = TSK_RUNNING, set = 0;
 
 	if (static_branch_likely(&psi_disabled))
 		return;
 
-	if (!sleep) {
-		if (p->in_memstall)
-			clear |= TSK_MEMSTALL;
+	if (migrate) {
+		clear = p->psi_flags;
 	} else {
 		/*
 		 * When a task sleeps, schedule() dequeues it before
@@ -153,8 +160,8 @@ static inline void psi_task_tick(struct rq *rq)
 		psi_memstall_tick(rq->curr, cpu_of(rq));
 }
 #else /* CONFIG_PSI */
-static inline void psi_enqueue(struct task_struct *p, bool wakeup) {}
-static inline void psi_dequeue(struct task_struct *p, bool sleep) {}
+static inline void psi_enqueue(struct task_struct *p, bool migrate) {}
+static inline void psi_dequeue(struct task_struct *p, bool migrate) {}
 static inline void psi_ttwu_dequeue(struct task_struct *p) {}
 static inline void psi_sched_switch(struct task_struct *prev,
 				    struct task_struct *next,
