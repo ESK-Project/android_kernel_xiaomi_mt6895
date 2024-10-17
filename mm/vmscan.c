@@ -2677,8 +2677,6 @@ DEFINE_STATIC_KEY_ARRAY_FALSE(lru_gen_caps, NR_LRU_GEN_CAPS);
  *                          shorthand helpers
  ******************************************************************************/
 
-#define LRU_REFS_FLAGS	(BIT(PG_referenced) | BIT(PG_workingset))
-
 #define DEFINE_MAX_SEQ(lruvec)						\
 	unsigned long max_seq = READ_ONCE((lruvec)->lrugen.max_seq)
 
@@ -4219,7 +4217,8 @@ bool lru_gen_look_around(struct page_vma_mapped_walk *pvmw)
 
 	if (!walk && bitmap_weight(bitmap, MIN_LRU_BATCH) < PAGEVEC_SIZE) {
 		for_each_set_bit(i, bitmap, MIN_LRU_BATCH) {
-			page = pte_page(pte[i]);
+			page = compound_head(pte_page(pte[i]));
+			page_clear_lru_refs(page);
 			activate_page(page);
 		}
 		return true;
@@ -4351,7 +4350,7 @@ static bool isolate_page(struct lruvec *lruvec, struct page *page, struct scan_c
 
 	/* see the comment on MAX_NR_TIERS */
 	if (!PageReferenced(page))
-		set_mask_bits(&page->flags, LRU_REFS_MASK | LRU_REFS_FLAGS, 0);
+		page_clear_lru_refs(page);
 
 	/* for shrink_page_list() */
 	ClearPageReclaim(page);
