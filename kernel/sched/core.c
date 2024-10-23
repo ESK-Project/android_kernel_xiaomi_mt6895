@@ -1702,6 +1702,8 @@ static inline bool dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 	trace_android_rvh_dequeue_task(rq, p, flags);
 	dequeued = p->sched_class->dequeue_task(rq, p, flags);
 	trace_android_rvh_after_dequeue_task(rq, p);
+	if (dequeued && (flags & DEQUEUE_DELAYED))
+		__block_task(rq, p);
 	return dequeued;
 }
 
