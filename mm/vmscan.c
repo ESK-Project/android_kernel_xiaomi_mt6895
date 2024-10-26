@@ -4240,6 +4240,7 @@ static bool sort_page(struct lruvec *lruvec, struct page *page, struct scan_cont
 		       int tier_idx)
 {
 	bool success;
+	bool dirty, writeback;
 	int gen = page_lru_gen(page);
 	int type = page_is_file_lru(page);
 	int zone = page_zonenum(page);
@@ -4294,9 +4295,16 @@ static bool sort_page(struct lruvec *lruvec, struct page *page, struct scan_cont
 		return true;
 	}
 
+	dirty = PageDirty(page);
+	writeback = PageWriteback(page);
+	if (type == LRU_GEN_FILE && dirty) {
+		sc->nr.file_taken += delta;
+		if (!writeback)
+			sc->nr.unqueued_dirty += delta;
+	}
+
 	/* waiting for writeback */
-	if (PageLocked(page) || PageWriteback(page) ||
-	    (type == LRU_GEN_FILE && PageDirty(page))) {
+	if (PageLocked(page) || writeback || (type == LRU_GEN_FILE && dirty)) {
 		gen = page_inc_gen(lruvec, page, true);
 		list_move(&page->lru, &lrugen->lists[gen][type][zone]);
 		return true;
@@ -4408,6 +4416,9 @@ static int scan_pages(unsigned long nr_to_scan, struct lruvec *lruvec, struct sc
 	__count_memcg_events(memcg, item, isolated);
 	__count_memcg_events(memcg, PGREFILL, sorted);
 	__count_vm_events(PGSCAN_ANON + type, isolated);
+
+	if (type == LRU_GEN_FILE)
+		sc->nr.file_taken += isolated;
 
 	*nr_isolated = isolated;
 
@@ -4546,6 +4557,7 @@ static int evict_pages(unsigned long nr_to_scan, struct lruvec *lruvec,
 		return scanned;
 retry:
 	reclaimed = shrink_page_list(&list, pgdat, sc, &stat, false);
+	sc->nr.unqueued_dirty += stat.nr_unqueued_dirty;
 	sc->nr_reclaimed += reclaimed;
 
 	list_for_each_entry_safe_reverse(page, next, &list, lru) {
@@ -4706,6 +4718,8 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 	struct blk_plug plug;
 	bool need_aging = false;
 	bool need_swapping = false;
+	unsigned int file_taken = sc->nr.file_taken;
+	unsigned int unqueued_dirty = sc->nr.unqueued_dirty;
 	unsigned long scanned = 0;
 	unsigned long reclaimed = sc->nr_reclaimed;
 	DEFINE_MAX_SEQ(lruvec);
@@ -4754,6 +4768,10 @@ done:
 
 	blk_finish_plug(&plug);
 
+	file_taken = sc->nr.file_taken - file_taken;
+	unqueued_dirty = sc->nr.unqueued_dirty - unqueued_dirty;
+	if (unqueued_dirty && unqueued_dirty == file_taken)
+		wakeup_flusher_threads(WB_REASON_VMSCAN);
 }
 
 /******************************************************************************
