@@ -489,7 +489,7 @@ struct sched_entity {
 	struct cfs_rq			*cfs_rq;
 	/* rq "owned" by this entity/group: */
 	struct cfs_rq			*my_q;
-	/* cached value of my_q->h_nr_running */
+	/* cached value of my_q->h_nr_queued - my_q->h_nr_delayed */
 	unsigned long			runnable_weight;
 #endif
 
