@@ -8297,6 +8297,9 @@ int can_migrate_task(struct task_struct *p, struct lb_env *env)
 	if (!can_migrate)
 		return 0;
 
+	if (p->se.sched_delayed && env->migration_type != migrate_load)
+		return 0;
+
 	/*
 	 * We do not migrate tasks that are:
 	 * 1) throttled_lb_pair, or
