@@ -1908,7 +1908,7 @@ static void update_numa_stats(struct task_numa_env *env,
 		ns->load += cpu_load(rq);
 		ns->runnable += cpu_runnable(rq);
 		ns->util += cpu_util(cpu);
-		ns->nr_running += rq->cfs.h_nr_running;
+		ns->nr_running += rq->cfs.h_nr_queued;
 		ns->compute_capacity += capacity_of(cpu);
 
 		if (find_idle && !rq->nr_running && idle_cpu(cpu)) {
@@ -5365,7 +5365,7 @@ static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 	walk_tg_tree_from(cfs_rq->tg, tg_throttle_down, tg_nop, (void *)rq);
 	rcu_read_unlock();
 
-	task_delta = cfs_rq->h_nr_running;
+	task_delta = cfs_rq->h_nr_queued;
 	runnable_delta = cfs_rq->h_nr_runnable;
 	idle_task_delta = cfs_rq->idle_h_nr_running;
 	delayed_delta = cfs_rq->h_nr_delayed;
@@ -5386,7 +5386,7 @@ static bool throttle_cfs_rq(struct cfs_rq *cfs_rq)
 			se_update_runnable(se);
 		}
 
-		qcfs_rq->h_nr_running -= task_delta;
+		qcfs_rq->h_nr_queued -= task_delta;
 		qcfs_rq->h_nr_runnable -= runnable_delta;
 		qcfs_rq->idle_h_nr_running -= idle_task_delta;
 		qcfs_rq->h_nr_delayed -= delayed_delta;
@@ -5431,7 +5431,7 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 	if (!cfs_rq->load.weight)
 		return;
 
-	task_delta = cfs_rq->h_nr_running;
+	task_delta = cfs_rq->h_nr_queued;
 	runnable_delta = cfs_rq->h_nr_runnable;
 	idle_task_delta = cfs_rq->idle_h_nr_running;
 	delayed_delta = cfs_rq->h_nr_delayed;
@@ -5447,7 +5447,7 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 			break;
 		enqueue_entity(cfs_rq, se, ENQUEUE_WAKEUP);
 
-		cfs_rq->h_nr_running += task_delta;
+		cfs_rq->h_nr_queued += task_delta;
 		cfs_rq->h_nr_runnable += runnable_delta;
 		cfs_rq->idle_h_nr_running += idle_task_delta;
 		cfs_rq->h_nr_delayed += delayed_delta;
@@ -5463,7 +5463,7 @@ void unthrottle_cfs_rq(struct cfs_rq *cfs_rq)
 		update_load_avg(cfs_rq, se, UPDATE_TG);
 		se_update_runnable(se);
 
-		cfs_rq->h_nr_running += task_delta;
+		cfs_rq->h_nr_queued += task_delta;
 		cfs_rq->h_nr_runnable += runnable_delta;
 		cfs_rq->idle_h_nr_running += idle_task_delta;
 		cfs_rq->h_nr_delayed += delayed_delta;
@@ -6004,7 +6004,7 @@ static void hrtick_start_fair(struct rq *rq, struct task_struct *p)
 
 	SCHED_WARN_ON(task_rq(p) != rq);
 
-	if (rq->cfs.h_nr_running > 1) {
+	if (rq->cfs.h_nr_queued > 1) {
 		u64 ran = se->sum_exec_runtime - se->prev_sum_exec_runtime;
 		u64 slice = se->slice;
 		s64 delta = slice - ran;
@@ -6165,7 +6165,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		cfs_rq = cfs_rq_of(se);
 		enqueue_entity(cfs_rq, se, flags);
 
-		cfs_rq->h_nr_running++;
+		cfs_rq->h_nr_queued++;
 		if (!h_nr_delayed)
 			cfs_rq->h_nr_runnable++;
 		cfs_rq->idle_h_nr_running += idle_h_nr_running;
@@ -6186,7 +6186,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		se_update_runnable(se);
 		update_cfs_group(se);
 
-		cfs_rq->h_nr_running++;
+		cfs_rq->h_nr_queued++;
 		if (!h_nr_delayed)
 			cfs_rq->h_nr_runnable++;
 		cfs_rq->idle_h_nr_running += idle_h_nr_running;
@@ -6264,14 +6264,14 @@ static int __dequeue_entities(struct rq *rq, struct sched_entity *se,
 	bool task_delayed = flags & DEQUEUE_DELAYED;
 	struct task_struct *p = NULL;
 	int idle_h_nr_running = 0;
-	int h_nr_running = 0;
+	int h_nr_queued = 0;
 	int h_nr_delayed = 0;
 	struct cfs_rq *cfs_rq;
 	int ret = 0;
 
 	if (entity_is_task(se)) {
 		p = task_of(se);
-		h_nr_running = 1;
+		h_nr_queued = 1;
 		idle_h_nr_running = task_has_idle_policy(p);
 		if (!task_sleep && !task_delayed)
 			h_nr_delayed = !!se->sched_delayed;
@@ -6285,9 +6285,9 @@ static int __dequeue_entities(struct rq *rq, struct sched_entity *se,
 			break;
 		}
 
-		cfs_rq->h_nr_running -= h_nr_running;
+		cfs_rq->h_nr_queued -= h_nr_queued;
 		if (!h_nr_delayed)
-			cfs_rq->h_nr_runnable -= h_nr_running;
+			cfs_rq->h_nr_runnable -= h_nr_queued;
 		cfs_rq->idle_h_nr_running -= idle_h_nr_running;
 		cfs_rq->h_nr_delayed -= h_nr_delayed;
 
@@ -6320,9 +6320,9 @@ static int __dequeue_entities(struct rq *rq, struct sched_entity *se,
 		se_update_runnable(se);
 		update_cfs_group(se);
 
-		cfs_rq->h_nr_running -= h_nr_running;
+		cfs_rq->h_nr_queued -= h_nr_queued;
 		if (!h_nr_delayed)
-			cfs_rq->h_nr_runnable -= h_nr_running;
+			cfs_rq->h_nr_runnable -= h_nr_queued;
 		cfs_rq->idle_h_nr_running -= idle_h_nr_running;
 		cfs_rq->h_nr_delayed -= h_nr_delayed;
 
@@ -6332,7 +6332,7 @@ static int __dequeue_entities(struct rq *rq, struct sched_entity *se,
 
 	}
 
-	sub_nr_running(rq, h_nr_running);
+	sub_nr_running(rq, h_nr_queued);
 
 	/* balance early to pull high priority tasks */
 	if (unlikely(!was_sched_idle && sched_idle_rq(rq)))
@@ -9157,7 +9157,7 @@ static inline void update_sg_lb_stats(struct lb_env *env,
 		sgs->group_load += cpu_load(rq);
 		sgs->group_util += cpu_util(i);
 		sgs->group_runnable += cpu_runnable(rq);
-		sgs->sum_h_nr_running += rq->cfs.h_nr_running;
+		sgs->sum_h_nr_running += rq->cfs.h_nr_queued;
 
 		nr_running = rq->nr_running;
 		sgs->sum_nr_running += nr_running;
@@ -9427,7 +9427,7 @@ static inline void update_sg_wakeup_stats(struct sched_domain *sd,
 		sgs->group_util += cpu_util_without(i, p);
 		sgs->group_runnable += cpu_runnable_without(rq, p);
 		local = task_running_on_cpu(i, p);
-		sgs->sum_h_nr_running += rq->cfs.h_nr_running - local;
+		sgs->sum_h_nr_running += rq->cfs.h_nr_queued - local;
 
 		nr_running = rq->nr_running - local;
 		sgs->sum_nr_running += nr_running;
@@ -10110,7 +10110,7 @@ static struct rq *find_busiest_queue(struct lb_env *env,
 			continue;
 
 		capacity = capacity_of(i);
-		nr_running = rq->cfs.h_nr_running;
+		nr_running = rq->cfs.h_nr_queued;
 
 		/*
 		 * For ASYM_CPUCAPACITY domains, don't pick a CPU that could
@@ -11380,7 +11380,7 @@ out:
 	 * have been enqueued in the meantime. Since we're not going idle,
 	 * pretend we pulled a task.
 	 */
-	if (this_rq->cfs.h_nr_running && !pulled_task)
+	if (this_rq->cfs.h_nr_queued && !pulled_task)
 		pulled_task = 1;
 
 	/* Move the next balance forward */
@@ -11388,7 +11388,7 @@ out:
 		this_rq->next_balance = next_balance;
 
 	/* Is there a task of a high priority class? */
-	if (this_rq->nr_running != this_rq->cfs.h_nr_running)
+	if (this_rq->nr_running != this_rq->cfs.h_nr_queued)
 		pulled_task = -1;
 
 	if (pulled_task)
