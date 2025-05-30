@@ -2451,6 +2451,34 @@ static void prepare_scan_count(pg_data_t *pgdat, struct scan_control *sc)
 	}
 }
 
+static unsigned long apply_proportional_protection(struct mem_cgroup *memcg,
+		struct scan_control *sc, unsigned long scan)
+{
+	unsigned long min, low;
+
+	mem_cgroup_protection(sc->target_mem_cgroup, memcg, &min, &low);
+
+	if (min || low) {
+		unsigned long cgroup_size = mem_cgroup_size(memcg);
+		unsigned long protection;
+
+		/* memory.low is best effort; retry with memory.min before OOM. */
+		if (!sc->memcg_low_reclaim && low > min) {
+			protection = low;
+			sc->memcg_low_skipped = 1;
+		} else {
+			protection = min;
+		}
+
+		/* Avoid TOCTOU with the earlier protection check. */
+		cgroup_size = max(cgroup_size, protection);
+		scan -= scan * protection / (cgroup_size + 1);
+		scan = max(scan, SWAP_CLUSTER_MAX);
+	}
+
+	return scan;
+}
+
 /*
  * Determine how aggressively the anon and file LRU lists should be
  * scanned.  The relative value of each set of LRU lists is determined
@@ -2558,70 +2586,10 @@ out:
 	for_each_evictable_lru(lru) {
 		int file = is_file_lru(lru);
 		unsigned long lruvec_size;
-		unsigned long low, min;
 		unsigned long scan;
 
 		lruvec_size = lruvec_lru_size(lruvec, lru, sc->reclaim_idx);
-		mem_cgroup_protection(sc->target_mem_cgroup, memcg,
-				      &min, &low);
-
-		if (min || low) {
-			/*
-			 * Scale a cgroup's reclaim pressure by proportioning
-			 * its current usage to its memory.low or memory.min
-			 * setting.
-			 *
-			 * This is important, as otherwise scanning aggression
-			 * becomes extremely binary -- from nothing as we
-			 * approach the memory protection threshold, to totally
-			 * nominal as we exceed it.  This results in requiring
-			 * setting extremely liberal protection thresholds. It
-			 * also means we simply get no protection at all if we
-			 * set it too low, which is not ideal.
-			 *
-			 * If there is any protection in place, we reduce scan
-			 * pressure by how much of the total memory used is
-			 * within protection thresholds.
-			 *
-			 * There is one special case: in the first reclaim pass,
-			 * we skip over all groups that are within their low
-			 * protection. If that fails to reclaim enough pages to
-			 * satisfy the reclaim goal, we come back and override
-			 * the best-effort low protection. However, we still
-			 * ideally want to honor how well-behaved groups are in
-			 * that case instead of simply punishing them all
-			 * equally. As such, we reclaim them based on how much
-			 * memory they are using, reducing the scan pressure
-			 * again by how much of the total memory used is under
-			 * hard protection.
-			 */
-			unsigned long cgroup_size = mem_cgroup_size(memcg);
-			unsigned long protection;
-
-			/* memory.low scaling, make sure we retry before OOM */
-			if (!sc->memcg_low_reclaim && low > min) {
-				protection = low;
-				sc->memcg_low_skipped = 1;
-			} else {
-				protection = min;
-			}
-
-			/* Avoid TOCTOU with earlier protection check */
-			cgroup_size = max(cgroup_size, protection);
-
-			scan = lruvec_size - lruvec_size * protection /
-				(cgroup_size + 1);
-
-			/*
-			 * Minimally target SWAP_CLUSTER_MAX pages to keep
-			 * reclaim moving forwards, avoiding decrementing
-			 * sc->priority further than desirable.
-			 */
-			scan = max(scan, SWAP_CLUSTER_MAX);
-		} else {
-			scan = lruvec_size;
-		}
-
+		scan = apply_proportional_protection(memcg, sc, lruvec_size);
 		scan >>= sc->priority;
 
 		/*
@@ -3975,14 +3943,13 @@ done:
 }
 
 static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq, unsigned long *min_seq,
-			     struct scan_control *sc, bool can_swap, unsigned long *nr_to_scan)
+			     bool can_swap, unsigned long *nr_to_scan)
 {
 	int gen, type, zone;
 	unsigned long old = 0;
 	unsigned long young = 0;
 	unsigned long total = 0;
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
-	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 
 	for (type = !can_swap; type < ANON_AND_FILE; type++) {
 		unsigned long seq;
@@ -4004,8 +3971,7 @@ static bool should_run_aging(struct lruvec *lruvec, unsigned long max_seq, unsig
 		}
 	}
 
-	/* try to scrape all its memory if this memcg was deleted */
-	*nr_to_scan = mem_cgroup_online(memcg) ? (total >> sc->priority) : total;
+	*nr_to_scan = total;
 
 	/*
 	 * The aging tries to be lazy to reduce the overhead, while the eviction
@@ -4048,7 +4014,9 @@ static bool age_lruvec(struct lruvec *lruvec, struct scan_control *sc, unsigned 
 	if (mem_cgroup_below_min(memcg))
 		return false;
 
-	need_aging = should_run_aging(lruvec, max_seq, min_seq, sc, swappiness, &nr_to_scan);
+	need_aging = should_run_aging(lruvec, max_seq, min_seq, swappiness, &nr_to_scan);
+	if (mem_cgroup_online(memcg))
+		nr_to_scan >>= sc->priority;
 
 	if (min_ttl) {
 		int gen = lru_gen_from_seq(min_seq[LRU_GEN_FILE]);
@@ -4371,7 +4339,7 @@ static bool isolate_page(struct lruvec *lruvec, struct page *page, struct scan_c
 	return true;
 }
 
-static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
+static int scan_pages(unsigned long nr_to_scan, struct lruvec *lruvec, struct scan_control *sc,
 		      int type, int tier, struct list_head *list)
 {
 	int i;
@@ -4380,7 +4348,7 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 	int sorted = 0;
 	int scanned = 0;
 	int isolated = 0;
-	int remaining = MAX_LRU_BATCH;
+	int remaining = min_t(unsigned long, nr_to_scan, MAX_LRU_BATCH);
 	struct lru_gen_struct *lrugen = &lruvec->lrugen;
 	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
 
@@ -4440,6 +4408,7 @@ static int scan_pages(struct lruvec *lruvec, struct scan_control *sc,
 	__count_memcg_events(memcg, PGREFILL, sorted);
 	__count_vm_events(PGSCAN_ANON + type, isolated);
 
+
 	/*
 	 * There might not be eligible pages due to reclaim_idx, may_unmap and
 	 * may_writepage. Check the remaining to prevent livelock if it's not
@@ -4496,7 +4465,8 @@ static int get_type_to_scan(struct lruvec *lruvec, int swappiness, int *tier_idx
 	return type;
 }
 
-static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc, int swappiness,
+static int isolate_pages(unsigned long nr_to_scan, struct lruvec *lruvec,
+			 struct scan_control *sc, int swappiness,
 			 int *type_scanned, struct list_head *list)
 {
 	int i;
@@ -4525,7 +4495,7 @@ static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc, int swa
 		if (tier < 0)
 			tier = get_tier_idx(lruvec, type);
 
-		scanned = scan_pages(lruvec, sc, type, tier, list);
+		scanned = scan_pages(nr_to_scan, lruvec, sc, type, tier, list);
 		if (scanned)
 			break;
 
@@ -4538,7 +4508,8 @@ static int isolate_pages(struct lruvec *lruvec, struct scan_control *sc, int swa
 	return scanned;
 }
 
-static int evict_pages(struct lruvec *lruvec, struct scan_control *sc, int swappiness,
+static int evict_pages(unsigned long nr_to_scan, struct lruvec *lruvec,
+		       struct scan_control *sc, int swappiness,
 		       bool *need_swapping)
 {
 	int type;
@@ -4557,7 +4528,8 @@ static int evict_pages(struct lruvec *lruvec, struct scan_control *sc, int swapp
 
 	spin_lock_irq(&pgdat->lru_lock);
 
-	scanned = isolate_pages(lruvec, sc, swappiness, &type, &list);
+	scanned = isolate_pages(nr_to_scan, lruvec, sc, swappiness,
+				&type, &list);
 
 	scanned += try_to_inc_min_seq(lruvec, swappiness);
 
@@ -4650,7 +4622,9 @@ static unsigned long get_nr_to_scan(struct lruvec *lruvec, struct scan_control *
 	    (mem_cgroup_below_low(memcg) && !sc->memcg_low_reclaim))
 		return 0;
 
-	*need_aging = should_run_aging(lruvec, max_seq, min_seq, sc, can_swap, &nr_to_scan);
+	*need_aging = should_run_aging(lruvec, max_seq, min_seq, can_swap, &nr_to_scan);
+	if (mem_cgroup_online(memcg))
+		nr_to_scan = apply_proportional_protection(memcg, sc, nr_to_scan) >> sc->priority;
 	if (!*need_aging)
 		return nr_to_scan;
 
@@ -4752,7 +4726,7 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 		if (!nr_to_scan)
 			goto done;
 
-		delta = evict_pages(lruvec, sc, swappiness, &need_swapping);
+		delta = evict_pages(nr_to_scan, lruvec, sc, swappiness, &need_swapping);
 		if (!delta)
 			goto done;
 
@@ -4773,6 +4747,7 @@ done:
 	clear_mm_walk();
 
 	blk_finish_plug(&plug);
+
 }
 
 /******************************************************************************
@@ -5222,7 +5197,8 @@ static int run_eviction(struct lruvec *lruvec, unsigned long seq, struct scan_co
 		if (sc->nr_reclaimed >= nr_to_reclaim)
 			return 0;
 
-		if (!evict_pages(lruvec, sc, swappiness, NULL))
+		if (!evict_pages(nr_to_reclaim - sc->nr_reclaimed, lruvec, sc,
+				 swappiness, NULL))
 			return 0;
 
 		cond_resched();
