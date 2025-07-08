@@ -878,12 +878,13 @@ struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
 /* Protect progress up to the shortest slice, or the unscaled base quantum. */
 static inline void set_protect_slice(struct sched_entity *se)
 {
-	u64 slice = se->slice;
+	u64 slice = normalized_sysctl_sched_min_granularity;
 	u64 vprot = se->deadline;
 
-	if (!sched_feat(RUN_TO_PARITY))
-		slice = min(slice, normalized_sysctl_sched_min_granularity);
+	if (sched_feat(RUN_TO_PARITY))
+		slice = cfs_rq_min_slice(cfs_rq_of(se));
 
+	slice = min(slice, se->slice);
 	if (slice != se->slice)
 		vprot = min_vruntime(vprot, se->vruntime + calc_delta_fair(slice, se));
 
