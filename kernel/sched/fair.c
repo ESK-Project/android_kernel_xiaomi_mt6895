@@ -920,7 +920,7 @@ static inline void cancel_protect_slice(struct sched_entity *se)
  *
  * Which allows tree pruning through eligibility.
  */
-static struct sched_entity *__pick_eevdf(struct cfs_rq *cfs_rq)
+static struct sched_entity *__pick_eevdf(struct cfs_rq *cfs_rq, bool protect)
 {
 	struct rb_node *node = cfs_rq->tasks_timeline.rb_root.rb_node;
 	struct sched_entity *se = __pick_first_entity(cfs_rq);
@@ -937,7 +937,7 @@ static struct sched_entity *__pick_eevdf(struct cfs_rq *cfs_rq)
 	if (curr && (!curr->on_rq || !entity_eligible(cfs_rq, curr)))
 		curr = NULL;
 
-	if (curr && protect_slice(curr))
+	if (curr && protect && protect_slice(curr))
 		return curr;
 
 	/* Pick the leftmost entity if it's eligible */
@@ -983,7 +983,7 @@ found:
 
 static struct sched_entity *pick_eevdf(struct cfs_rq *cfs_rq)
 {
-	struct sched_entity *se = __pick_eevdf(cfs_rq);
+	struct sched_entity *se = __pick_eevdf(cfs_rq, true);
 
 	if (!se) {
 		struct sched_entity *left = __pick_first_entity(cfs_rq);
@@ -1187,27 +1187,6 @@ static inline bool resched_next_slice(struct cfs_rq *cfs_rq, struct sched_entity
 		return false;
 
 	return !entity_eligible(cfs_rq, curr);
-}
-
-static inline bool do_preempt_short(struct cfs_rq *cfs_rq,
-				    struct sched_entity *pse, struct sched_entity *se)
-{
-	if (!sched_feat(PREEMPT_SHORT))
-		return false;
-
-	if (pse->slice >= se->slice)
-		return false;
-
-	if (!entity_eligible(cfs_rq, pse))
-		return false;
-
-	if (entity_before(pse, se))
-		return true;
-
-	if (!entity_eligible(cfs_rq, se))
-		return true;
-
-	return false;
 }
 
 static void update_curr(struct cfs_rq *cfs_rq)
@@ -7795,6 +7774,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	int next_buddy_marked = 0;
 	bool cse_is_idle, pse_is_idle;
 	bool preempt = false, nopreempt = false;
+	bool preempt_short = false;
 
 	if (unlikely(se == pse))
 		return;
@@ -7842,7 +7822,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	 * in the inverse case).
 	 */
 	if (cse_is_idle && !pse_is_idle) {
-		cancel_protect_slice(se);
+		preempt_short = true;
 		goto preempt;
 	}
 	if (cse_is_idle != pse_is_idle)
@@ -7863,15 +7843,16 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (nopreempt)
 		return;
 
-	if (do_preempt_short(cfs_rq, pse, se))
-		cancel_protect_slice(se);
-
-	if (pick_eevdf(cfs_rq) == pse)
+	preempt_short = sched_feat(PREEMPT_SHORT) && pse->slice < se->slice;
+	if (__pick_eevdf(cfs_rq, !preempt_short) == pse)
 		goto preempt;
 
 	return;
 
 preempt:
+	if (preempt_short)
+		cancel_protect_slice(se);
+
 	resched_curr(rq);
 }
 
