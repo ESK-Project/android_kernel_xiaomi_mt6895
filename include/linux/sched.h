@@ -478,7 +478,11 @@ struct sched_entity {
 	u64				sum_exec_runtime;
 	u64				prev_sum_exec_runtime;
 	u64				vruntime;
-	s64				vlag;
+	union {
+		/* Lag while dequeued; protected vruntime while running. */
+		s64			vlag;
+		u64			vprot;
+	};
 	u64				slice;
 
 	u64				nr_migrations;
