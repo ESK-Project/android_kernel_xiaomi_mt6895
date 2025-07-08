@@ -1189,14 +1189,6 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq)
 /*
  * Update the current task's runtime statistics.
  */
-static inline bool resched_next_slice(struct cfs_rq *cfs_rq, struct sched_entity *curr)
-{
-	if (protect_slice(curr))
-		return false;
-
-	return !entity_eligible(cfs_rq, curr);
-}
-
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
@@ -1237,7 +1229,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	if (cfs_rq->nr_running == 1 || skip_preempt)
 		return;
 
-	if (resched || resched_next_slice(cfs_rq, curr)) {
+	if (resched || !protect_slice(curr)) {
 		resched_curr(rq);
 		clear_buddies(cfs_rq, curr);
 	}
