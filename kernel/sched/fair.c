@@ -876,19 +876,26 @@ struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
 }
 
 /* Protect progress up to the shortest slice, or the unscaled base quantum. */
-static inline void set_protect_slice(struct sched_entity *se)
+static inline void set_protect_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	u64 slice = normalized_sysctl_sched_min_granularity;
 	u64 vprot = se->deadline;
 
 	if (sched_feat(RUN_TO_PARITY))
-		slice = cfs_rq_min_slice(cfs_rq_of(se));
+		slice = cfs_rq_min_slice(cfs_rq);
 
 	slice = min(slice, se->slice);
 	if (slice != se->slice)
 		vprot = min_vruntime(vprot, se->vruntime + calc_delta_fair(slice, se));
 
 	se->vprot = vprot;
+}
+
+static inline void update_protect_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
+{
+	u64 slice = cfs_rq_min_slice(cfs_rq);
+
+	se->vprot = min_vruntime(se->vprot, se->vruntime + calc_delta_fair(slice, se));
 }
 
 static inline bool protect_slice(struct sched_entity *se)
@@ -5093,7 +5100,7 @@ void set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 		update_stats_wait_end(cfs_rq, se);
 		__dequeue_entity(cfs_rq, se);
 		update_load_avg(cfs_rq, se, UPDATE_TG);
-		set_protect_slice(se);
+		set_protect_slice(cfs_rq, se);
 	}
 
 	update_stats_curr_start(cfs_rq, se);
@@ -7847,6 +7854,9 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	preempt_short = sched_feat(PREEMPT_SHORT) && pse->slice < se->slice;
 	if (__pick_eevdf(cfs_rq, !preempt_short) == pse)
 		goto preempt;
+
+	if (sched_feat(RUN_TO_PARITY) && preempt_short)
+		update_protect_slice(cfs_rq, se);
 
 	return;
 
