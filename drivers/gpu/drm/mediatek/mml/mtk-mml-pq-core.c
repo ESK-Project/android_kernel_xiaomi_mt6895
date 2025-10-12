@@ -1140,8 +1140,8 @@ static void handle_comp_config_result(struct mml_pq_chan *chan,
 	struct mml_pq_aal_config_param *aal_param;
 	struct mml_pq_reg *aal_regs;
 	struct mml_pq_reg *hdr_regs;
-	struct mml_pq_reg *ds_regs;
-	struct mml_pq_reg *color_regs;
+	struct mml_pq_reg *ds_regs = NULL;
+	struct mml_pq_reg *color_regs = NULL;
 	u32 *aal_curve;
 	u32 *hdr_curve;
 	s32 ret;

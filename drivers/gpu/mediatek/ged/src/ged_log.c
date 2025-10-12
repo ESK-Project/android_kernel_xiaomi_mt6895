@@ -1192,7 +1192,7 @@ EXPORT_SYMBOL(ged_log_dump);
 
 static noinline int tracing_mark_write(const char *buf)
 {
-	trace_printk(buf);
+	trace_printk("%s", buf);
 	return 0;
 }
 void ged_log_trace_begin(char *name)
