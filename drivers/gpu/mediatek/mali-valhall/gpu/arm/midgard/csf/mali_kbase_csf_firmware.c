@@ -1806,7 +1806,7 @@ int kbase_csf_firmware_early_init(struct kbase_device *kbdev)
 
 int kbase_csf_firmware_init(struct kbase_device *kbdev)
 {
-	const struct firmware *firmware;
+	const struct firmware *firmware = NULL;
 	const u32 magic = FIRMWARE_HEADER_MAGIC;
 	u8 version_major, version_minor;
 	u32 version_hash;
