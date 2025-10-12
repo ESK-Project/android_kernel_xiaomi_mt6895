@@ -4250,7 +4250,7 @@ struct mtk_raw_device *get_master_raw_dev(struct mtk_cam_device *cam,
 struct mtk_raw_device *get_slave_raw_dev(struct mtk_cam_device *cam,
 					 struct mtk_raw_pipeline *pipe)
 {
-	struct device *dev_slave;
+	struct device *dev_slave = NULL;
 	unsigned int i;
 
 	for (i = 0; i < cam->num_raw_drivers - 1; i++) {
@@ -4266,7 +4266,7 @@ struct mtk_raw_device *get_slave_raw_dev(struct mtk_cam_device *cam,
 struct mtk_raw_device *get_slave2_raw_dev(struct mtk_cam_device *cam,
 					  struct mtk_raw_pipeline *pipe)
 {
-	struct device *dev_slave;
+	struct device *dev_slave = NULL;
 	unsigned int i;
 
 	for (i = 0; i < cam->num_raw_drivers; i++) {
