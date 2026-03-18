@@ -804,7 +804,7 @@ static bool page_referenced_one(struct page *page, struct vm_area_struct *vma,
 
 		if (pvmw.pte) {
 			trace_android_vh_look_around(&pvmw, page, vma, &referenced);
-			if (lru_gen_enabled() &&
+			if (lru_gen_enabled() && !lru_gen_switching() &&
 			    !(vma->vm_flags & (VM_SEQ_READ | VM_RAND_READ))) {
 				if (lru_gen_look_around(&pvmw))
 					referenced++;
