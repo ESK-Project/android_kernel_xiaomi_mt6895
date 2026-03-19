@@ -303,8 +303,7 @@ void __migration_entry_wait(struct mm_struct *mm, pte_t *ptep,
 	if (!is_migration_entry(entry))
 		goto out;
 
-	page = migration_entry_to_page(entry);
-	page = compound_head(page);
+	page = migration_entry_to_compound_page(entry);
 
 	/*
 	 * Once page cache replacement of page migration started, page_count
