@@ -4297,9 +4297,13 @@ static bool sort_page(struct lruvec *lruvec, struct page *page, struct scan_cont
 
 	dirty = PageDirty(page);
 	writeback = PageWriteback(page);
-	if (type == LRU_GEN_FILE && dirty) {
+	if (type == LRU_GEN_FILE && (dirty || writeback)) {
+		sc->nr.taken += delta;
 		sc->nr.file_taken += delta;
-		if (!writeback)
+		sc->nr.dirty += delta;
+		if (writeback)
+			sc->nr.writeback += delta;
+		else
 			sc->nr.unqueued_dirty += delta;
 	}
 
@@ -4417,6 +4421,7 @@ static int scan_pages(unsigned long nr_to_scan, struct lruvec *lruvec, struct sc
 	__count_memcg_events(memcg, PGREFILL, sorted);
 	__count_vm_events(PGSCAN_ANON + type, isolated);
 
+	sc->nr.taken += isolated;
 	if (type == LRU_GEN_FILE)
 		sc->nr.file_taken += isolated;
 
@@ -4557,7 +4562,11 @@ static int evict_pages(unsigned long nr_to_scan, struct lruvec *lruvec,
 		return scanned;
 retry:
 	reclaimed = shrink_page_list(&list, pgdat, sc, &stat, false);
+	sc->nr.dirty += stat.nr_dirty;
+	sc->nr.congested += stat.nr_congested;
 	sc->nr.unqueued_dirty += stat.nr_unqueued_dirty;
+	sc->nr.writeback += stat.nr_writeback;
+	sc->nr.immediate += stat.nr_immediate;
 	sc->nr_reclaimed += reclaimed;
 
 	list_for_each_entry_safe_reverse(page, next, &list, lru) {
@@ -4719,6 +4728,7 @@ static void lru_gen_shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc
 	bool need_aging = false;
 	bool need_swapping = false;
 	unsigned int file_taken = sc->nr.file_taken;
+	unsigned int dirty = sc->nr.dirty;
 	unsigned int unqueued_dirty = sc->nr.unqueued_dirty;
 	unsigned long scanned = 0;
 	unsigned long reclaimed = sc->nr_reclaimed;
@@ -4769,9 +4779,19 @@ done:
 	blk_finish_plug(&plug);
 
 	file_taken = sc->nr.file_taken - file_taken;
+	dirty = sc->nr.dirty - dirty;
 	unqueued_dirty = sc->nr.unqueued_dirty - unqueued_dirty;
-	if (unqueued_dirty && unqueued_dirty == file_taken)
-		wakeup_flusher_threads(WB_REASON_VMSCAN);
+	if (file_taken && dirty >= file_taken) {
+		if (unqueued_dirty)
+			wakeup_flusher_threads(WB_REASON_VMSCAN);
+
+		/* Filtered pages cannot reach the legacy per-page writeback wait. */
+		if (!writeback_throttling_sane(sc) &&
+		    (sc->gfp_mask & (__GFP_IO | __GFP_FS)) == (__GFP_IO | __GFP_FS) &&
+		    !sc->hibernation_mode && current_may_throttle() &&
+		    !(current->flags & (PF_IO_WORKER | PF_KTHREAD)))
+			congestion_wait(BLK_RW_ASYNC, HZ / 10);
+	}
 }
 
 /******************************************************************************
