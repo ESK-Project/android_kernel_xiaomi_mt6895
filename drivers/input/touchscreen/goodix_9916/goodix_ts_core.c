@@ -67,7 +67,6 @@ extern void touch_irq_boost(void);
 #define EVENT_INPUT 0x1
 extern void lpm_disable_for_dev(bool on, char event_dev);
 #endif
-extern struct device *global_spi_parent_device;
 struct goodix_module goodix_modules;
 int core_module_prob_sate = CORE_MODULE_UNPROBED;
 struct goodix_ts_core *goodix_core_data;
@@ -3939,4 +3938,3 @@ MODULE_DESCRIPTION("Goodix Touchscreen Core Module");
 MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
 MODULE_AUTHOR("Goodix, Inc.");
 MODULE_LICENSE("GPL v2");
-
