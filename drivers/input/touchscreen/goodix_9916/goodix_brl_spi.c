@@ -375,6 +375,8 @@ err_alloc_tx_buf:
 static int goodix_spi_remove(struct spi_device *spi)
 {
 	platform_device_unregister(goodix_pdev);
+	kfree(goodix_spi_bus.rx_buf);
+	kfree(goodix_spi_bus.tx_buf);
 	return 0;
 }
 
