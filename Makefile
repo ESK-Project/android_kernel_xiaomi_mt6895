@@ -1005,6 +1005,8 @@ endif
 ifdef CONFIG_LTO_CLANG
 ifdef CONFIG_LTO_CLANG_THIN
 CC_FLAGS_LTO	:= -flto=thin -fsplit-lto-unit
+# LLVM tunings
+KBUILD_LDFLAGS	+= --thinlto-jobs=all
 else
 CC_FLAGS_LTO	:= -flto
 endif
