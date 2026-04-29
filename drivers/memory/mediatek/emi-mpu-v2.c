@@ -145,7 +145,6 @@ static irqreturn_t emimpu_violation_irq(int irq, void *dev_id)
 	bool violation, miu_violation;
 	irqreturn_t irqret;
 	const unsigned int hp_mask = 0x600000;
-	char md_str[MTK_EMI_MAX_CMD_LEN + 13] = {'\0'};
 
 	nr_vio = 0;
 	msg_len = 0;
@@ -251,9 +250,9 @@ static irqreturn_t emimpu_violation_irq(int irq, void *dev_id)
 		 * purpose.
 		 */
 		if (mpu->md_handler) {
-			strncpy(md_str, "emi-mpu-v2.c", 13);
-			strncat(md_str, mpu->vio_msg, sizeof(md_str) - strlen(md_str) - 1);
-			mpu->md_handler(md_str);
+			scnprintf(mpu->md_msg, MTK_EMI_MAX_CMD_LEN + 13,
+				"emi-mpu-v2.c%s", mpu->vio_msg);
+			mpu->md_handler(mpu->md_msg);
 		}
 
 		/*
@@ -572,6 +571,11 @@ static int emimpu_probe(struct platform_device *pdev)
 	mpu->vio_msg = devm_kmalloc(&pdev->dev,
 		MTK_EMI_MAX_CMD_LEN, GFP_KERNEL);
 	if (!(mpu->vio_msg))
+		return -ENOMEM;
+
+	mpu->md_msg = devm_kmalloc(&pdev->dev,
+		MTK_EMI_MAX_CMD_LEN + 13, GFP_KERNEL);
+	if (!mpu->md_msg)
 		return -ENOMEM;
 
 	global_emi_mpu = mpu;

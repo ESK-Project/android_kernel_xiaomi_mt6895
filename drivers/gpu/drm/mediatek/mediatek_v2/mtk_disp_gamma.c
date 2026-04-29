@@ -607,35 +607,45 @@ static void calculateGamma12bitLut(struct DISP_GAMMA_12BIT_LUT_T *data)
 void mtk_trans_gain_to_gamma(struct drm_crtc *crtc,
 	unsigned int gain[3], unsigned int bl)
 {
+	struct DISP_GAMMA_LUT_T *gamma_lut = NULL;
+	struct DISP_GAMMA_12BIT_LUT_T *gamma_12bit_lut = NULL;
+
 	if (g_sb_param.gain[gain_r] != gain[gain_r] &&
 		g_sb_param.gain[gain_g] != gain[gain_g] &&
 		g_sb_param.gain[gain_b] != gain[gain_b]) {
+		if (g_gamma_data_mode == HW_8BIT) {
+			gamma_lut = kzalloc(sizeof(*gamma_lut), GFP_KERNEL);
+			if (!gamma_lut)
+				return;
+		} else if (g_gamma_data_mode == HW_12BIT_MODE_8BIT ||
+			g_gamma_data_mode == HW_12BIT_MODE_12BIT) {
+			gamma_12bit_lut = kzalloc(sizeof(*gamma_12bit_lut),
+				GFP_KERNEL);
+			if (!gamma_12bit_lut)
+				return;
+		}
 
 		g_sb_param.gain[gain_r] = gain[gain_r];
 		g_sb_param.gain[gain_g] = gain[gain_g];
 		g_sb_param.gain[gain_b] = gain[gain_b];
 
 		if (g_gamma_data_mode == HW_8BIT) {
-			struct DISP_GAMMA_LUT_T data;
-
-			calculateGammaLut(&data);
+			calculateGammaLut(gamma_lut);
 			mtk_crtc_user_cmd(crtc, default_comp,
-				SET_GAMMALUT, (void *)&data);
-		}
-
-		if (g_gamma_data_mode == HW_12BIT_MODE_8BIT ||
+				SET_GAMMALUT, gamma_lut);
+		} else if (g_gamma_data_mode == HW_12BIT_MODE_8BIT ||
 			g_gamma_data_mode == HW_12BIT_MODE_12BIT) {
-			struct DISP_GAMMA_12BIT_LUT_T data;
-
-			calculateGamma12bitLut(&data);
+			calculateGamma12bitLut(gamma_12bit_lut);
 			mtk_crtc_user_cmd(crtc, default_comp,
-				SET_12BIT_GAMMALUT, (void *)&data);
+				SET_12BIT_GAMMALUT, gamma_12bit_lut);
 		}
 
 		mtk_leds_brightness_set("lcd-backlight", bl);
 		mtk_crtc_check_trigger(default_comp->mtk_crtc, false, true);
 		DDPINFO("%s : gain = %d, backlight = %d",
 			__func__, g_sb_param.gain[gain_r], bl);
+		kfree(gamma_12bit_lut);
+		kfree(gamma_lut);
 	} else {
 		if (g_sb_param.bl != bl) {
 			g_sb_param.bl = bl;

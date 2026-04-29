@@ -60,6 +60,7 @@ struct emi_mpu {
 
 	/* debugging log for EMI MPU violation */
 	char *vio_msg;
+	char *md_msg;
 	unsigned int in_msg_dump;
 
 	/* hook functions in worker thread */
