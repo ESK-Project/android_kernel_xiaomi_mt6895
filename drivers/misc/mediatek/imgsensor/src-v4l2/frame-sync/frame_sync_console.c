@@ -285,22 +285,12 @@ static ssize_t fsync_console_store(
 	struct device *dev, struct device_attribute *attr,
 	const char *buf, size_t count)
 {
-	int ret = 0, len = 0;
 	unsigned int cmd = 0;
 	enum fs_console_cmd_id cmd_id = 0;
-	char str_buf[PAGE_SIZE] = {0};
 
 
 	/* convert string to unsigned int */
-	ret = kstrtouint(buf, 0, &cmd);
-	if (ret != 0) {
-		SHOW(str_buf, len,
-			"\n\t[fsync_console]: kstrtoint failed, input:%s, cmd:%u, ret:%d\n",
-			buf,
-			cmd,
-			ret);
-	}
-
+	kstrtouint(buf, 0, &cmd);
 
 	cmd_id = fs_console_get_cmd_id(cmd);
 
