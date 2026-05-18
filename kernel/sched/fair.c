@@ -4294,6 +4294,10 @@ static void detach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 #define UPDATE_TG	0x1
 #define SKIP_AGE_LOAD	0x2
 #define DO_ATTACH	0x4
+#define UPDATE_UTIL_EST	0x10
+
+static inline void util_est_update(struct cfs_rq *cfs_rq,
+				   struct task_struct *p, bool task_sleep);
 
 /* Update task and its cfs_rq load average */
 static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
@@ -4332,6 +4336,9 @@ static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 		if (flags & UPDATE_TG)
 			update_tg_load_avg(cfs_rq);
 	}
+
+	if (flags & UPDATE_UTIL_EST)
+		util_est_update(cfs_rq, task_of(se), true);
 }
 
 #ifndef CONFIG_64BIT
@@ -4723,6 +4730,7 @@ static inline void update_misfit_status(struct task_struct *p, struct rq *rq)
 #define UPDATE_TG	0x0
 #define SKIP_AGE_LOAD	0x0
 #define DO_ATTACH	0x0
+#define UPDATE_UTIL_EST	0x0
 
 static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se, int not_used1)
 {
@@ -5028,6 +5036,7 @@ static bool
 dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
 	bool sleep = flags & DEQUEUE_SLEEP;
+	int action = 0;
 
 	/*
 	 * Update run-time statistics of the 'current'.
@@ -5047,11 +5056,17 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 		SCHED_WARN_ON(delay && se->sched_delayed);
 		if (sched_feat(DELAY_DEQUEUE) && delay &&
 		    !entity_eligible(cfs_rq, se)) {
-			update_load_avg(cfs_rq, se, 0);
+			if (entity_is_task(se))
+				action |= UPDATE_UTIL_EST;
+			update_load_avg(cfs_rq, se, action);
 			set_delayed(se);
 			return false;
 		}
 	}
+
+	action = UPDATE_TG;
+	if (entity_is_task(se) && sleep && !(flags & DEQUEUE_DELAYED))
+		action |= UPDATE_UTIL_EST;
 
 	/*
 	 * When dequeuing a sched_entity, we must:
@@ -5061,7 +5076,7 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 *   - For group entity, update its weight to reflect the new share
 	 *     of its group cfs_rq.
 	 */
-	update_load_avg(cfs_rq, se, UPDATE_TG);
+	update_load_avg(cfs_rq, se, action);
 	se_update_runnable(se);
 
 	update_stats_dequeue(cfs_rq, se, flags);
@@ -6485,7 +6500,6 @@ static bool dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	if (!p->se.sched_delayed)
 		util_est_dequeue(&rq->cfs, p);
 
-	util_est_update(&rq->cfs, p, flags & DEQUEUE_SLEEP);
 	if (__dequeue_entities(rq, &p->se, flags, false) < 0)
 		return false;
 
