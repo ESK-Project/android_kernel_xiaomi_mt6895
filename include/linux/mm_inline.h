@@ -251,11 +251,13 @@ static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page, bo
 	 */
 	if (PageActive(page))
 		seq = lrugen->max_seq;
+	else if (reclaiming)
+		seq = lrugen->min_seq[type];
 	else if ((type == LRU_GEN_ANON && !PageSwapCache(page)) ||
 		 (PageReclaim(page) &&
 		  (PageDirty(page) || PageWriteback(page))))
 		seq = lrugen->max_seq - 1;
-	else if (reclaiming || lrugen->min_seq[type] + MIN_NR_GENS >= lrugen->max_seq)
+	else if (lrugen->min_seq[type] + MIN_NR_GENS >= lrugen->max_seq)
 		seq = lrugen->min_seq[type];
 	else
 		seq = lrugen->min_seq[type] + 1;
