@@ -4814,7 +4814,13 @@ static bool fill_evictable(struct lruvec *lruvec)
 
 		while (!list_empty(head)) {
 			bool success;
-			struct page *page = lru_to_page(head);
+			struct page *page;
+
+			/* Match the insertion end to preserve hot/cold order. */
+			if (active)
+				page = lru_to_page(head);
+			else
+				page = list_first_entry(head, struct page, lru);
 
 			VM_WARN_ON_ONCE_PAGE(PageUnevictable(page), page);
 			VM_WARN_ON_ONCE_PAGE(PageActive(page) != active, page);
@@ -4822,7 +4828,7 @@ static bool fill_evictable(struct lruvec *lruvec)
 			VM_WARN_ON_ONCE_PAGE(page_lru_gen(page) != -1, page);
 
 			del_page_from_lru_list(page, lruvec);
-			success = lru_gen_add_page(lruvec, page, false);
+			success = lru_gen_add_page(lruvec, page, !active);
 			VM_WARN_ON_ONCE(!success);
 
 			if (!--remaining)
