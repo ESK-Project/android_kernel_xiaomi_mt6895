@@ -12,6 +12,10 @@
 
 #include "sched.h"
 
+#ifdef CONFIG_SCHED_BORE
+#include <linux/sched/bore.h>
+#endif
+
 #include <linux/nospec.h>
 
 #include <linux/kcov.h>
@@ -890,7 +894,11 @@ int tg_nop(struct task_group *tg, void *data)
 static void set_load_weight(struct task_struct *p)
 {
 	bool update_load = !(READ_ONCE(p->state) & TASK_NEW);
+#ifdef CONFIG_SCHED_BORE
+	int prio = effective_prio_bore(p);
+#else
 	int prio = p->static_prio - MAX_RT_PRIO;
+#endif
 	struct load_weight lw;
 
 	if (task_has_idle_policy(p)) {
@@ -3353,6 +3361,10 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
 	p->on_rq			= 0;
 
+#ifdef CONFIG_SCHED_BORE
+	reset_task_bore(p);
+#endif
+
 	p->se.on_rq			= 0;
 	p->se.exec_start		= 0;
 	p->se.sum_exec_runtime		= 0;
@@ -3518,9 +3530,20 @@ static inline void init_schedstats(void) {}
  */
 int sched_fork(unsigned long clone_flags, struct task_struct *p)
 {
+#ifdef CONFIG_SCHED_BORE
+	struct bore_ctx bore = p->bore;
+#endif
+
 	trace_android_rvh_sched_fork(p);
 
 	__sched_fork(clone_flags, p);
+#ifdef CONFIG_SCHED_BORE
+	/* Keep the penalties and inheritance caches from dup_task_struct(). */
+	p->bore.prev_penalty = bore.prev_penalty;
+	p->bore.penalty = bore.penalty;
+	p->bore.subtree = bore.subtree;
+	p->bore.group = bore.group;
+#endif
 	/*
 	 * We mark the process as NEW here. This guarantees that
 	 * nobody will actually run it, and a signal or other external
@@ -3618,6 +3641,9 @@ void sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
 void sched_post_fork(struct task_struct *p)
 {
 	uclamp_post_fork(p);
+#ifdef CONFIG_SCHED_BORE
+	sched_post_fork_bore(p);
+#endif
 }
 
 u64 to_ratio(u64 period, u64 runtime)
@@ -7558,6 +7584,10 @@ void __init sched_init(void)
 #endif
 
 	wait_bit_init();
+
+#ifdef CONFIG_SCHED_BORE
+	sched_init_bore();
+#endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	ptr += 2 * nr_cpu_ids * sizeof(void **);

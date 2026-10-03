@@ -42,6 +42,10 @@
 
 #include <asm/futex.h>
 
+#ifdef CONFIG_SCHED_BORE
+#include <linux/sched/bore.h>
+#endif
+
 #include "../locking/rtmutex_common.h"
 #include <trace/hooks/futex.h>
 
@@ -2623,7 +2627,13 @@ static void futex_wait_queue_me(struct futex_hash_bucket *hb, struct futex_q *q,
 		 */
 		if (!timeout || timeout->task) {
 			trace_android_vh_futex_sleep_start(current);
+#ifdef CONFIG_SCHED_BORE
+			current->bore.futex_waiting = true;
+#endif
 			freezable_schedule();
+#ifdef CONFIG_SCHED_BORE
+			current->bore.futex_waiting = false;
+#endif
 		}
 	}
 	__set_current_state(TASK_RUNNING);

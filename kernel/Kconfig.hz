@@ -57,3 +57,13 @@ config HZ
 
 config SCHED_HRTICK
 	def_bool HIGH_RES_TIMERS
+
+config MIN_BASE_SLICE_NS
+	int "Default value for min_base_slice_ns"
+	depends on SCHED_BORE
+	default 2000000
+	range 0 2000000000
+	help
+	  Set the lower bound of the BORE base slice, in nanoseconds.
+	  The scheduler rounds it up to a whole number of timer ticks.
+	  Larger values reduce scheduling overhead but increase latency.

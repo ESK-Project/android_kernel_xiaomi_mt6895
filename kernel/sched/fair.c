@@ -23,6 +23,10 @@
 #include <linux/rbtree_augmented.h>
 #include "sched.h"
 
+#ifdef CONFIG_SCHED_BORE
+#include <linux/sched/bore.h>
+#endif
+
 #include <trace/hooks/sched.h>
 
 EXPORT_TRACEPOINT_SYMBOL_GPL(sched_stat_runtime);
@@ -53,18 +57,29 @@ static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
  *   SCHED_TUNABLESCALING_LOG - scaled logarithmical, *1+ilog(ncpus)
  *   SCHED_TUNABLESCALING_LINEAR - scaled linear, *ncpus
  *
- * (default SCHED_TUNABLESCALING_LOG = *(1+ilog(ncpus))
+ * BORE defaults to SCHED_TUNABLESCALING_NONE; otherwise use LOG.
  */
+#ifdef CONFIG_SCHED_BORE
+enum sched_tunable_scaling sysctl_sched_tunable_scaling = SCHED_TUNABLESCALING_NONE;
+#else
 enum sched_tunable_scaling sysctl_sched_tunable_scaling = SCHED_TUNABLESCALING_LOG;
+#endif
 
 /*
  * EEVDF base request slice. Keep the Android 5.10 public symbol name:
  *
- * (default: 0.75 msec * (1 + ilog(ncpus)), units: nanoseconds)
+ * BORE rounds its minimum slice up to a whole number of ticks.
+ * Otherwise, default to 0.70 msec * (1 + ilog(ncpus)).
  */
+#ifdef CONFIG_SCHED_BORE
+static const unsigned int nsecs_per_tick = NSEC_PER_SEC / HZ;
+unsigned int sysctl_sched_min_base_slice = CONFIG_MIN_BASE_SLICE_NS;
+unsigned int sysctl_sched_min_granularity __read_mostly = NSEC_PER_SEC / HZ;
+#else
 unsigned int sysctl_sched_min_granularity			= 700000ULL;
-EXPORT_SYMBOL_GPL(sysctl_sched_min_granularity);
 static unsigned int normalized_sysctl_sched_min_granularity	= 700000ULL;
+#endif
+EXPORT_SYMBOL_GPL(sysctl_sched_min_granularity);
 
 /*
  * After fork, child runs first. If set to 0 (default) then
@@ -174,13 +189,32 @@ static unsigned int get_update_sysctl_factor(void)
 	return factor;
 }
 
+#ifdef CONFIG_SCHED_BORE
+int sched_update_min_base_slice(unsigned int value)
+{
+	u64 ticks = max_t(u64, 1, DIV_ROUND_UP_ULL((u64)value, nsecs_per_tick));
+	u64 slice = nsecs_per_tick * ticks;
+
+	/* The legacy sched_min_granularity_ns sysctl reads a signed int. */
+	if (slice > INT_MAX)
+		return -ERANGE;
+	WRITE_ONCE(sysctl_sched_min_base_slice, value);
+	WRITE_ONCE(sysctl_sched_base_slice, (unsigned int)slice);
+	return 0;
+}
+#endif
+
 static void update_sysctl(void)
 {
 	unsigned int factor = get_update_sysctl_factor();
 
 #define SET_SYSCTL(name) \
 	(sysctl_##name = (factor) * normalized_sysctl_##name)
+#ifdef CONFIG_SCHED_BORE
+	sched_update_min_base_slice(sysctl_sched_min_base_slice);
+#else
 	SET_SYSCTL(sched_min_granularity);
+#endif
 	SET_SYSCTL(sched_latency);
 	SET_SYSCTL(sched_wakeup_granularity);
 #undef SET_SYSCTL
@@ -681,6 +715,10 @@ static s64 entity_lag(u64 avruntime, struct sched_entity *se)
 
 	vlag = avruntime - se->vruntime;
 	limit = calc_delta_fair(max_t(u64, 2*se->slice, TICK_NSEC), se);
+#ifdef CONFIG_SCHED_BORE
+	if (static_branch_likely(&sched_bore_key))
+		limit >>= 1;
+#endif
 
 	return clamp(vlag, -limit, limit);
 }
@@ -878,7 +916,11 @@ struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
 /* Protect progress up to the shortest slice, or the unscaled base quantum. */
 static inline void set_protect_slice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+#ifdef CONFIG_SCHED_BORE
+	u64 slice = sysctl_sched_base_slice;
+#else
 	u64 slice = normalized_sysctl_sched_min_granularity;
+#endif
 	u64 vprot = se->deadline;
 
 	if (sched_feat(RUN_TO_PARITY))
@@ -945,8 +987,20 @@ static struct sched_entity *__pick_eevdf(struct cfs_rq *cfs_rq, bool protect)
 	if (curr && (!curr->on_rq || !entity_eligible(cfs_rq, curr)))
 		curr = NULL;
 
-	if (curr && protect && protect_slice(curr))
-		return curr;
+	if (curr && protect && protect_slice(curr)) {
+#ifdef CONFIG_SCHED_BORE
+		if (static_branch_likely(&sched_bore_key)) {
+			if ((static_branch_likely(&sched_burst_protect_slice_cond_key) ||
+			     static_branch_unlikely(&sched_burst_protect_slice_prefer_key)) &&
+			    (!entity_is_task(curr) || !task_of(curr)->bore.futex_waiting))
+				return curr;
+		} else {
+#endif
+			return curr;
+#ifdef CONFIG_SCHED_BORE
+		}
+#endif
+	}
 
 	/* Pick the leftmost entity if it's eligible */
 	if (se && entity_eligible(cfs_rq, se)) {
@@ -1022,14 +1076,22 @@ struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
 int sched_proc_update_handler(struct ctl_table *table, int write,
 		void *buffer, size_t *lenp, loff_t *ppos)
 {
-	int ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+	int ret;
 	unsigned int factor = get_update_sysctl_factor();
 
+#ifdef CONFIG_SCHED_BORE
+	if (write && (table->data == &sysctl_sched_base_slice ||
+		      table->data == &sysctl_sched_tunable_scaling))
+		return -EPERM;
+#endif
+	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
 	if (ret || !write)
 		return ret;
 #define WRT_SYSCTL(name) \
 	(normalized_sysctl_##name = sysctl_##name / (factor))
+#ifndef CONFIG_SCHED_BORE
 	WRT_SYSCTL(sched_min_granularity);
+#endif
 	WRT_SYSCTL(sched_latency);
 	WRT_SYSCTL(sched_wakeup_granularity);
 #undef WRT_SYSCTL
@@ -1219,6 +1281,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	if (entity_is_task(curr)) {
 		struct task_struct *curtask = task_of(curr);
 
+#ifdef CONFIG_SCHED_BORE
+		update_curr_bore(curtask, delta_exec);
+#endif
 		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
 		cgroup_account_cputime(curtask, delta_exec);
 		account_group_exec_runtime(curtask, delta_exec);
@@ -3553,8 +3618,13 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 			    unsigned long weight)
 {
 	bool curr = cfs_rq->curr == se;
+	bool pelt_attached = true;
 	u64 avruntime;
 
+	/* Sleeping migration clears this until the new rq attaches the load. */
+#ifdef CONFIG_SMP
+	pelt_attached = se->avg.last_update_time;
+#endif
 	if (se->on_rq) {
 		/* commit outstanding execution time */
 		update_curr(cfs_rq);
@@ -3563,7 +3633,8 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 			__dequeue_entity(cfs_rq, se);
 		update_load_sub(&cfs_rq->load, se->load.weight);
 	}
-	dequeue_load_avg(cfs_rq, se);
+	if (pelt_attached)
+		dequeue_load_avg(cfs_rq, se);
 
 	if (se->on_rq) {
 		reweight_eevdf(se, avruntime, weight);
@@ -3586,7 +3657,8 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 	} while (0);
 #endif
 
-	enqueue_load_avg(cfs_rq, se);
+	if (pelt_attached)
+		enqueue_load_avg(cfs_rq, se);
 	if (se->on_rq) {
 		update_load_add(&cfs_rq->load, se->load.weight);
 		if (!curr)
@@ -4738,14 +4810,13 @@ static inline void update_misfit_status(struct task_struct *p, struct rq *rq) {}
 #endif /* CONFIG_SMP */
 
 static void
-place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
+place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
-	u64 vslice, vruntime = avg_vruntime(cfs_rq);
+	u64 vslice = 0, vruntime = avg_vruntime(cfs_rq);
 	s64 lag = 0;
 
 	if (!se->custom_slice)
 		se->slice = sysctl_sched_base_slice;
-	vslice = calc_delta_fair(se->slice, se);
 
 	/*
 	 * Due to how V is constructed as the weighted average of entities,
@@ -4831,20 +4902,35 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 		goto placed;
 	}
 
+#ifdef CONFIG_SCHED_BORE
+	if (static_branch_likely(&sched_bore_key) && entity_is_task(se) &&
+	    task_of(se)->bore.futex_waiting)
+		goto vslice_found;
+#endif
+	vslice = calc_delta_fair(se->slice, se);
+#ifdef CONFIG_SCHED_BORE
+	if (static_branch_likely(&sched_bore_key)) {
+		vslice >>= !!(flags & (ENQUEUE_INITIAL | ENQUEUE_WAKEUP));
+		goto vslice_found;
+	}
+#endif
 	/*
 	 * When joining the competition; the exisiting tasks will be,
 	 * on average, halfway through their slice, as such start tasks
 	 * off with half a slice to ease into the competition.
 	 */
-	if (sched_feat(PLACE_DEADLINE_INITIAL) && initial)
+	if (sched_feat(PLACE_DEADLINE_INITIAL) && (flags & ENQUEUE_INITIAL))
 		vslice /= 2;
 
+#ifdef CONFIG_SCHED_BORE
+vslice_found:
+#endif
 	/*
 	 * EEVDF: vd_i = ve_i + r_i/w_i
 	 */
 	se->deadline = se->vruntime + vslice;
 placed:
-	trace_android_rvh_place_entity(cfs_rq, se, initial, vruntime);
+	trace_android_rvh_place_entity(cfs_rq, se, !!(flags & ENQUEUE_INITIAL), vruntime);
 }
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
@@ -4871,7 +4957,7 @@ static inline void check_schedstat_required(void)
 
 static inline bool cfs_bandwidth_used(void);
 
-static void requeue_delayed_entity(struct sched_entity *se);
+static void requeue_delayed_entity(struct sched_entity *se, int flags);
 
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
@@ -4883,7 +4969,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * update_curr().
 	 */
 	if (curr)
-		place_entity(cfs_rq, se, 0);
+		place_entity(cfs_rq, se, flags);
 
 	update_curr(cfs_rq);
 
@@ -4909,7 +4995,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	 * we can place the entity.
 	 */
 	if (!curr)
-		place_entity(cfs_rq, se, 0);
+		place_entity(cfs_rq, se, flags);
 
 	account_entity_enqueue(cfs_rq, se);
 
@@ -5031,6 +5117,10 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 		if (sched_feat(DELAY_DEQUEUE) && delay &&
 		    !entity_eligible(cfs_rq, se)) {
 			update_load_avg(cfs_rq, se, 0);
+#ifdef CONFIG_SCHED_BORE
+			if (static_branch_likely(&sched_bore_key) && sched_feat(DELAY_ZERO))
+				update_entity_lag(cfs_rq, se);
+#endif
 			set_delayed(se);
 			return false;
 		}
@@ -6165,7 +6255,7 @@ static int sched_idle_cpu(int cpu)
 }
 #endif
 
-static void requeue_delayed_entity(struct sched_entity *se)
+static void requeue_delayed_entity(struct sched_entity *se, int flags)
 {
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 
@@ -6178,13 +6268,22 @@ static void requeue_delayed_entity(struct sched_entity *se)
 	SCHED_WARN_ON(!se->on_rq);
 
 	if (sched_feat(DELAY_ZERO)) {
-		update_entity_lag(cfs_rq, se);
+#ifdef CONFIG_SCHED_BORE
+		if (static_branch_likely(&sched_bore_key)) {
+			flags |= ENQUEUE_WAKEUP;
+		} else {
+#endif
+			flags = 0;
+			update_entity_lag(cfs_rq, se);
+#ifdef CONFIG_SCHED_BORE
+		}
+#endif
 		if (se->vlag > 0) {
 			cfs_rq->nr_running--;
 			if (se != cfs_rq->curr)
 				__dequeue_entity(cfs_rq, se);
 			se->vlag = 0;
-			place_entity(cfs_rq, se, 0);
+			place_entity(cfs_rq, se, flags);
 			if (se != cfs_rq->curr)
 				__enqueue_entity(cfs_rq, se);
 			cfs_rq->nr_running++;
@@ -6221,7 +6320,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		util_est_enqueue(&rq->cfs, p);
 
 	if (flags & ENQUEUE_DELAYED) {
-		requeue_delayed_entity(se);
+		requeue_delayed_entity(se, flags);
 		return;
 	}
 
@@ -6241,7 +6340,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	for_each_sched_entity(se) {
 		if (se->on_rq) {
 			if (se->sched_delayed)
-				requeue_delayed_entity(se);
+				requeue_delayed_entity(se, flags);
 			break;
 		}
 		cfs_rq = cfs_rq_of(se);
@@ -6465,6 +6564,15 @@ static int dequeue_entities(struct rq *rq, struct sched_entity *se, int flags)
  */
 static bool dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
+#ifdef CONFIG_SCHED_BORE
+	struct cfs_rq *cfs_rq = cfs_rq_of(&p->se);
+
+	if ((flags & DEQUEUE_SLEEP) && !(flags & DEQUEUE_DELAYED)) {
+		if (cfs_rq->curr == &p->se)
+			update_curr(cfs_rq);
+		restart_burst_bore(p);
+	}
+#endif
 	if (!p->se.sched_delayed)
 		util_est_dequeue(&rq->cfs, p);
 
@@ -7767,6 +7875,22 @@ static void set_next_buddy(struct sched_entity *se)
 /*
  * Preempt the current task with a newly woken task if needed:
  */
+#ifdef CONFIG_SCHED_BORE
+static bool do_preempt_weight(struct cfs_rq *cfs_rq,
+			      struct sched_entity *pse, struct sched_entity *se)
+{
+	if (!static_branch_likely(&sched_bore_key) || !sched_feat(RUN_TO_PARITY) ||
+	    !static_branch_likely(&sched_burst_protect_slice_cond_key))
+		return false;
+	if (static_branch_unlikely(&sched_burst_protect_slice_prefer_key) ?
+	    pse->load.weight <= se->load.weight : pse->load.weight < se->load.weight)
+		return false;
+	if (!entity_eligible(cfs_rq, pse))
+		return false;
+	return entity_before(pse, se) || !entity_eligible(cfs_rq, se);
+}
+#endif
+
 static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 {
 	struct task_struct *curr = rq->curr;
@@ -7776,6 +7900,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	bool cse_is_idle, pse_is_idle;
 	bool preempt = false, nopreempt = false;
 	bool preempt_short = false;
+	bool preempt_weight = false;
 
 	if (unlikely(se == pse))
 		return;
@@ -7845,10 +7970,15 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 		return;
 
 	preempt_short = sched_feat(PREEMPT_SHORT) && pse->slice < se->slice;
+#ifdef CONFIG_SCHED_BORE
+	preempt_weight = do_preempt_weight(cfs_rq, pse, se);
+	if (preempt_weight)
+		cancel_protect_slice(se);
+#endif
 	if (__pick_eevdf(cfs_rq, !preempt_short) == pse)
 		goto preempt;
 
-	if (sched_feat(RUN_TO_PARITY) && preempt_short)
+	if (sched_feat(RUN_TO_PARITY) && preempt_short && !preempt_weight)
 		update_protect_slice(cfs_rq, se);
 
 	return;
@@ -8052,16 +8182,25 @@ static void yield_task_fair(struct rq *rq)
 	/*
 	 * Are we the only task in the tree?
 	 */
+#ifndef CONFIG_SCHED_BORE
 	if (unlikely(rq->nr_running == 1))
 		return;
 
 	clear_buddies(cfs_rq, se);
+#endif
 
 	update_rq_clock(rq);
 	/*
 	 * Update run-time statistics of the 'current'.
 	 */
 	update_curr(cfs_rq);
+
+#ifdef CONFIG_SCHED_BORE
+	restart_burst_rescale_deadline_bore(curr);
+	if (unlikely(rq->nr_running == 1))
+		return;
+	clear_buddies(cfs_rq, se);
+#endif
 	/*
 	 * Tell update_rq_clock() that we've just updated,
 	 * so we don't do microscopic update in schedule()
@@ -11623,7 +11762,7 @@ static void task_fork_fair(struct task_struct *p)
 	curr = cfs_rq->curr;
 	if (curr)
 		update_curr(cfs_rq);
-	place_entity(cfs_rq, se, 1);
+	place_entity(cfs_rq, se, ENQUEUE_INITIAL);
 	rq_unlock(rq, &rf);
 }
 
@@ -11737,6 +11876,11 @@ static void switched_to_fair(struct rq *rq, struct task_struct *p)
 	SCHED_WARN_ON(p->se.sched_delayed);
 
 	attach_task_cfs_rq(p);
+
+#ifdef CONFIG_SCHED_BORE
+	reset_task_bore(p);
+	reweight_task_bore(p);
+#endif
 
 	if (task_on_rq_queued(p)) {
 		/*

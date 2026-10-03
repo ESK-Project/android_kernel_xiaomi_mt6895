@@ -8,6 +8,10 @@
  */
 #include "sched.h"
 
+#ifdef CONFIG_SCHED_BORE
+#include <linux/sched/bore.h>
+#endif
+
 /*
  * This allows printing both to /proc/sched_debug and
  * to the console
@@ -171,8 +175,60 @@ static const struct file_operations sched_feat_fops = {
 
 __read_mostly bool sched_debug_enabled;
 
+#ifdef CONFIG_SCHED_BORE
+static ssize_t
+sched_min_base_slice_write(struct file *filp, const char __user *ubuf,
+			   size_t cnt, loff_t *ppos)
+{
+	char buf[16];
+	unsigned int value;
+	int ret;
+
+	if (cnt >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, cnt))
+		return -EFAULT;
+	buf[cnt] = '\0';
+	ret = kstrtouint(buf, 10, &value);
+	if (ret)
+		return ret;
+	ret = sched_update_min_base_slice(value);
+	if (ret)
+		return ret;
+	*ppos += cnt;
+	return cnt;
+}
+
+static int sched_min_base_slice_show(struct seq_file *m, void *v)
+{
+	seq_printf(m, "%u\n", READ_ONCE(sysctl_sched_min_base_slice));
+	return 0;
+}
+
+static int sched_min_base_slice_open(struct inode *inode, struct file *filp)
+{
+	return single_open(filp, sched_min_base_slice_show, NULL);
+}
+
+static const struct file_operations sched_min_base_slice_fops = {
+	.open = sched_min_base_slice_open,
+	.write = sched_min_base_slice_write,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+#endif
+
 static __init int sched_init_debug(void)
 {
+#ifdef CONFIG_SCHED_BORE
+	struct dentry *debugfs_sched = debugfs_create_dir("sched", NULL);
+
+	debugfs_create_file("min_base_slice_ns", 0644, debugfs_sched, NULL,
+			    &sched_min_base_slice_fops);
+	debugfs_create_u32("base_slice_ns", 0444, debugfs_sched,
+			   &sysctl_sched_base_slice);
+#endif
 	debugfs_create_file("sched_features", 0644, NULL, NULL,
 			&sched_feat_fops);
 
@@ -528,6 +584,9 @@ print_task(struct seq_file *m, struct rq *rq, struct task_struct *p)
 		SPLIT_NS(p->se.sum_exec_runtime),
 		SPLIT_NS(schedstat_val_or_zero(p->se.statistics.sum_sleep_runtime)));
 
+#ifdef CONFIG_SCHED_BORE
+	SEQ_printf(m, " %2u", bore_score(p));
+#endif
 #ifdef CONFIG_NUMA_BALANCING
 	SEQ_printf(m, " %d %d", task_node(p), task_numa_group_id(p));
 #endif
@@ -1013,6 +1072,9 @@ void proc_sched_show_task(struct task_struct *p, struct pid_namespace *ns,
 	__PS("nr_involuntary_switches", p->nivcsw);
 
 	P(se.load.weight);
+#ifdef CONFIG_SCHED_BORE
+	__PS("bore.score", bore_score(p));
+#endif
 #ifdef CONFIG_SMP
 	P(se.avg.load_sum);
 	P(se.avg.runnable_sum);

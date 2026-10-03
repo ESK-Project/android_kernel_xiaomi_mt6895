@@ -663,6 +663,31 @@ struct wake_q_node {
 	struct wake_q_node *next;
 };
 
+#ifdef CONFIG_SCHED_BORE
+#define BORE_BC_TIMESTAMP_SHIFT 16
+
+struct bore_bc {
+	union {
+		struct {
+			u64 timestamp : 48;
+			u64 penalty : 16;
+		};
+		u64 value;
+	};
+};
+
+struct bore_ctx {
+	u64 burst_time;
+	u16 prev_penalty;
+	u16 curr_penalty;
+	u16 penalty;
+	bool stop_update;
+	bool futex_waiting;
+	struct bore_bc subtree;
+	struct bore_bc group;
+};
+#endif
+
 struct task_struct {
 #ifdef CONFIG_THREAD_INFO_IN_TASK
 	/*
@@ -721,6 +746,10 @@ struct task_struct {
 	struct task_group		*sched_task_group;
 #endif
 	struct sched_dl_entity		dl;
+
+#ifdef CONFIG_SCHED_BORE
+	struct bore_ctx			bore;
+#endif
 
 #ifdef CONFIG_UCLAMP_TASK
 	/*

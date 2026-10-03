@@ -1856,6 +1856,7 @@ extern const u32		sched_prio_to_wmult[40];
 #endif
 
 #define ENQUEUE_WAKEUP_SYNC	0x80
+#define ENQUEUE_INITIAL		0x100
 #define ENQUEUE_DELAYED		0x200
 
 #define RETRY_TASK		((void *)-1UL)
@@ -2151,6 +2152,11 @@ extern const_debug unsigned int sysctl_sched_migration_cost;
 
 /* Internal EEVDF name; preserve the Android 5.10 exported ABI symbol. */
 #define sysctl_sched_base_slice sysctl_sched_min_granularity
+
+#ifdef CONFIG_SCHED_BORE
+extern unsigned int sysctl_sched_min_base_slice;
+int sched_update_min_base_slice(unsigned int value);
+#endif
 
 #ifdef CONFIG_SCHED_HRTICK
 

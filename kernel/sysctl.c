@@ -1756,7 +1756,11 @@ static struct ctl_table kern_table[] = {
 		.procname	= "sched_min_granularity_ns",
 		.data		= &sysctl_sched_min_granularity,
 		.maxlen		= sizeof(unsigned int),
+#ifdef CONFIG_SCHED_BORE
+		.mode		= 0444,
+#else
 		.mode		= 0644,
+#endif
 		.proc_handler	= sched_proc_update_handler,
 		.extra1		= &min_sched_granularity_ns,
 		.extra2		= &max_sched_granularity_ns,
@@ -1784,7 +1788,11 @@ static struct ctl_table kern_table[] = {
 		.procname	= "sched_tunable_scaling",
 		.data		= &sysctl_sched_tunable_scaling,
 		.maxlen		= sizeof(enum sched_tunable_scaling),
+#ifdef CONFIG_SCHED_BORE
+		.mode		= 0444,
+#else
 		.mode		= 0644,
+#endif
 		.proc_handler	= sched_proc_update_handler,
 		.extra1		= &min_sched_tunable_scaling,
 		.extra2		= &max_sched_tunable_scaling,
