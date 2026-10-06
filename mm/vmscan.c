@@ -1073,6 +1073,12 @@ static enum page_references page_check_references(struct page *page,
 	if (referenced_ptes == -1)
 		return PAGEREF_KEEP;
 
+#ifdef CONFIG_64BIT
+	if (lru_gen_enabled() &&
+	    test_and_clear_bit(PG_oem_reserved_5, &page->flags))
+		return PAGEREF_ACTIVATE;
+#endif
+
 	if (referenced_ptes) {
 		/*
 		 * All mapped pages start out with page table
