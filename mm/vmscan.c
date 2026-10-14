@@ -4340,7 +4340,7 @@ static bool isolate_page(struct lruvec *lruvec, struct page *page, struct scan_c
 }
 
 static int scan_pages(unsigned long nr_to_scan, struct lruvec *lruvec, struct scan_control *sc,
-		      int type, int tier, struct list_head *list)
+		      int type, int tier, struct list_head *list, int *nr_isolated)
 {
 	int i;
 	int gen;
@@ -4354,6 +4354,7 @@ static int scan_pages(unsigned long nr_to_scan, struct lruvec *lruvec, struct sc
 
 	VM_WARN_ON_ONCE(!list_empty(list));
 
+	*nr_isolated = 0;
 	if (get_nr_gens(lruvec, type) == MIN_NR_GENS)
 		return 0;
 
@@ -4408,6 +4409,7 @@ static int scan_pages(unsigned long nr_to_scan, struct lruvec *lruvec, struct sc
 	__count_memcg_events(memcg, PGREFILL, sorted);
 	__count_vm_events(PGSCAN_ANON + type, isolated);
 
+	*nr_isolated = isolated;
 
 	/*
 	 * There might not be eligible pages due to reclaim_idx, may_unmap and
@@ -4467,7 +4469,7 @@ static int get_type_to_scan(struct lruvec *lruvec, int swappiness, int *tier_idx
 
 static int isolate_pages(unsigned long nr_to_scan, struct lruvec *lruvec,
 			 struct scan_control *sc, int swappiness,
-			 int *type_scanned, struct list_head *list)
+			 int *type_scanned, int *nr_isolated, struct list_head *list)
 {
 	int i;
 	int type;
@@ -4495,7 +4497,7 @@ static int isolate_pages(unsigned long nr_to_scan, struct lruvec *lruvec,
 		if (tier < 0)
 			tier = get_tier_idx(lruvec, type);
 
-		scanned = scan_pages(nr_to_scan, lruvec, sc, type, tier, list);
+		scanned = scan_pages(nr_to_scan, lruvec, sc, type, tier, list, nr_isolated);
 		if (scanned)
 			break;
 
@@ -4515,6 +4517,7 @@ static int evict_pages(unsigned long nr_to_scan, struct lruvec *lruvec,
 	int type;
 	int scanned;
 	int reclaimed;
+	int nr_isolated;
 	LIST_HEAD(list);
 	LIST_HEAD(clean);
 	struct page *page;
@@ -4529,7 +4532,8 @@ static int evict_pages(unsigned long nr_to_scan, struct lruvec *lruvec,
 	spin_lock_irq(&pgdat->lru_lock);
 
 	scanned = isolate_pages(nr_to_scan, lruvec, sc, swappiness,
-				&type, &list);
+				&type, &nr_isolated, &list);
+	__mod_node_page_state(pgdat, NR_ISOLATED_ANON + type, nr_isolated);
 
 	scanned += try_to_inc_min_seq(lruvec, swappiness);
 
@@ -4598,6 +4602,8 @@ retry:
 		skip_retry = true;
 		goto retry;
 	}
+
+	mod_node_page_state(pgdat, NR_ISOLATED_ANON + type, -nr_isolated);
 
 	if (need_swapping && type == LRU_GEN_ANON)
 		*need_swapping = true;
