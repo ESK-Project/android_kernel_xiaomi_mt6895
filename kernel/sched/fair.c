@@ -3573,13 +3573,23 @@ static void reweight_entity(struct cfs_rq *cfs_rq, struct sched_entity *se,
 	dequeue_load_avg(cfs_rq, se);
 
 	if (se->on_rq) {
+		s64 vprot = 0;
+
+		if (curr)
+			vprot = max_t(s64, se->vprot - se->vruntime, 0);
 		reweight_eevdf(se, avruntime, weight);
+		if (curr)
+			se->vprot = se->vruntime +
+				div_s64(vprot * se->load.weight, weight);
 	} else {
 		/*
 		 * Because we keep se->vlag = V - v_i, while: lag_i = w_i*(V - v_i),
 		 * we need to scale se->vlag when w_i changes.
 		 */
 		se->vlag = div_s64(se->vlag * se->load.weight, weight);
+		if (se->rel_deadline)
+			se->deadline = div_s64((s64)se->deadline * se->load.weight,
+					      weight);
 	}
 
 	trace_android_vh_reweight_entity(se);
