@@ -7059,13 +7059,19 @@ static inline int select_idle_smt(struct task_struct *p, struct sched_domain *sd
  * comparing the average scan cost (tracked in sd->avg_scan_cost) against the
  * average idle time for this rq (as found in rq->avg_idle).
  */
-static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, int target)
+static bool slice_fits_rq(struct task_struct *p, int cpu)
+{
+	return cpu_active(cpu) && p->se.slice < READ_ONCE(cpu_rq(cpu)->min_slice);
+}
+
+static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, int *best)
 {
 	struct cpumask *cpus = this_cpu_cpumask_var_ptr(select_idle_mask);
 	struct sched_domain *this_sd;
 	u64 avg_cost, avg_idle;
 	u64 time;
 	int this = smp_processor_id();
+	int target = *best, slice_cpu = -1;
 	int cpu, nr = INT_MAX;
 
 	this_sd = rcu_dereference(*this_cpu_ptr(&sd_llc));
@@ -7095,14 +7101,21 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, int t
 	cpumask_and(cpus, sched_domain_span(sd), p->cpus_ptr);
 
 	for_each_cpu_wrap(cpu, cpus, target) {
-		if (!--nr)
-			return -1;
+		if (!--nr) {
+			cpu = nr_cpumask_bits;
+			break;
+		}
 		if (available_idle_cpu(cpu) || sched_idle_cpu(cpu))
 			break;
+		if (slice_cpu < 0 && slice_fits_rq(p, cpu))
+			slice_cpu = cpu;
 	}
 
 	time = cpu_clock(this) - time;
 	update_avg(&this_sd->avg_scan_cost, time);
+
+	if (cpu >= nr_cpumask_bits && slice_cpu >= 0 && !slice_fits_rq(p, target))
+		*best = slice_cpu;
 
 	return cpu;
 }
@@ -7115,8 +7128,8 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, int t
 static int
 select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 {
-	unsigned long task_util, util_min, util_max, best_cap = 0;
-	int cpu, best_cpu = -1;
+	unsigned long task_util, util_min, util_max, best_cap = 0, slice_cap = 0;
+	int cpu, best_cpu = -1, slice_cpu = -1;
 	struct cpumask *cpus;
 
 	cpus = this_cpu_cpumask_var_ptr(select_idle_mask);
@@ -7129,8 +7142,14 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 	for_each_cpu_wrap(cpu, cpus, target) {
 		unsigned long cpu_cap = capacity_of(cpu);
 
-		if (!available_idle_cpu(cpu) && !sched_idle_cpu(cpu))
+		if (!available_idle_cpu(cpu) && !sched_idle_cpu(cpu)) {
+			if (cpu_cap > slice_cap && slice_fits_rq(p, cpu) &&
+			    util_fits_cpu(task_util, util_min, util_max, cpu)) {
+				slice_cap = cpu_cap;
+				slice_cpu = cpu;
+			}
 			continue;
+		}
 		if (util_fits_cpu(task_util, util_min, util_max, cpu))
 			return cpu;
 
@@ -7140,7 +7159,7 @@ select_idle_capacity(struct task_struct *p, struct sched_domain *sd, int target)
 		}
 	}
 
-	return best_cpu;
+	return slice_cpu >= 0 ? slice_cpu : best_cpu;
 }
 
 static inline bool asym_fits_cpu(unsigned long util,
@@ -7161,7 +7180,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 {
 	struct sched_domain *sd;
 	unsigned long task_util, util_min, util_max;
-	int i, recent_used_cpu;
+	int i, recent_used_cpu, best = target;
 
 	/*
 	 * On asymmetric system, update task utilization because we will check
@@ -7246,7 +7265,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
 
-	i = select_idle_cpu(p, sd, target);
+	i = select_idle_cpu(p, sd, &best);
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
 
@@ -7254,7 +7273,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	if ((unsigned)i < nr_cpumask_bits)
 		return i;
 
-	return target;
+	return best;
 }
 
 /**
