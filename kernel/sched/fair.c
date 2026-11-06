@@ -4389,6 +4389,12 @@ static void sync_entity_load_avg(struct sched_entity *se)
 	trace_android_vh_finish_update_load_avg_se(se, 0);
 }
 
+static void sync_task_load_avg(struct task_struct *p)
+{
+	if (!task_on_rq_queued(p))
+		sync_entity_load_avg(&p->se);
+}
+
 /*
  * Task first catches up with cfs_rq, and then subtract
  * itself from the cfs_rq (task must be off the queue now).
@@ -6885,7 +6891,7 @@ static inline int find_idlest_cpu(struct sched_domain *sd, struct task_struct *p
 	 * prev_cpu's last_update_time.
 	 */
 	if (!(sd_flag & SD_BALANCE_FORK))
-		sync_entity_load_avg(&p->se);
+		sync_task_load_avg(p);
 
 	while (sd) {
 		struct sched_group *group;
@@ -7187,7 +7193,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	 * that the task fits with cpu's capacity.
 	 */
 	if (static_branch_unlikely(&sched_asym_cpucapacity)) {
-		sync_entity_load_avg(&p->se);
+		sync_task_load_avg(p);
 		task_util = task_util_est(p);
 		util_min = uclamp_eff_value(p, UCLAMP_MIN);
 		util_max = uclamp_eff_value(p, UCLAMP_MAX);
@@ -7568,8 +7574,9 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	struct perf_domain *pd;
 	int new_cpu = INT_MAX;
 
-	sync_entity_load_avg(&p->se);
-	trace_android_rvh_find_energy_efficient_cpu(p, prev_cpu, sync, &new_cpu);
+	sync_task_load_avg(p);
+	if (!task_on_rq_queued(p))
+		trace_android_rvh_find_energy_efficient_cpu(p, prev_cpu, sync, &new_cpu);
 	if (new_cpu != INT_MAX)
 		return new_cpu;
 
@@ -7730,7 +7737,7 @@ fail:
 /*
  * select_task_rq_fair: Select target runqueue for the waking task in domains
  * that have the 'sd_flag' flag set. In practice, this is SD_BALANCE_WAKE,
- * SD_BALANCE_FORK, or SD_BALANCE_EXEC.
+ * SD_BALANCE_FORK, SD_BALANCE_EXEC, or zero for a push.
  *
  * Balances load by selecting the idlest CPU in the idlest group, or under
  * certain conditions an idle sibling CPU if the domain has SD_WAKE_AFFINE set.
@@ -7746,29 +7753,32 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 	int cpu = smp_processor_id();
 	int new_cpu = prev_cpu;
 	int want_affine = 0;
+	bool want_sibling = !(sd_flag & (SD_BALANCE_EXEC | SD_BALANCE_FORK));
 	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 	int target_cpu = -1;
 
-	if (trace_android_rvh_select_task_rq_fair_enabled() &&
-	    !(sd_flag & SD_BALANCE_FORK))
-		sync_entity_load_avg(&p->se);
-	trace_android_rvh_select_task_rq_fair(p, prev_cpu, sd_flag,
-			wake_flags, &target_cpu);
-	if (target_cpu >= 0)
-		return target_cpu;
+	if (sd_flag) {
+		if (trace_android_rvh_select_task_rq_fair_enabled() &&
+		    !(sd_flag & SD_BALANCE_FORK))
+			sync_task_load_avg(p);
+		trace_android_rvh_select_task_rq_fair(p, prev_cpu, sd_flag,
+				wake_flags, &target_cpu);
+		if (target_cpu >= 0)
+			return target_cpu;
+	}
 
-	if (sd_flag & SD_BALANCE_WAKE) {
+	if (sd_flag & SD_BALANCE_WAKE)
 		record_wakee(p);
 
-		if (sched_energy_enabled()) {
-			new_cpu = find_energy_efficient_cpu(p, prev_cpu, sync);
-			if (new_cpu >= 0)
-				return new_cpu;
-			new_cpu = prev_cpu;
-		}
-
-		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
+	if (want_sibling && sched_energy_enabled()) {
+		new_cpu = find_energy_efficient_cpu(p, prev_cpu, sync);
+		if (new_cpu >= 0)
+			return new_cpu;
+		new_cpu = prev_cpu;
 	}
+
+	if (sd_flag & SD_BALANCE_WAKE)
+		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
 
 	rcu_read_lock();
 	for_each_domain(cpu, tmp) {
@@ -7794,7 +7804,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 	if (unlikely(sd)) {
 		/* Slow path */
 		new_cpu = find_idlest_cpu(sd, p, cpu, prev_cpu, sd_flag);
-	} else if (sd_flag & SD_BALANCE_WAKE) { /* XXX always ? */
+	} else if (want_sibling) {
 		/* Fast path */
 
 		new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
