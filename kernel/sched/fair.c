@@ -7606,8 +7606,13 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 	}
 
 	trace_android_vh_em_cpu_energy(pd->em_pd, max_util, sum_util, &energy);
-	if (!energy)
-		energy = em_cpu_energy(pd->em_pd, max_util, sum_util);
+	if (!energy && sum_util) {
+		struct energy_cpu_stat stat;
+		struct energy_cpu_stat best = { .cpu = -1 };
+
+		find_pd_cost(pd->em_pd, max_util, cpu_cap, &stat, &best);
+		energy = stat.cost * sum_util / cpu_cap;
+	}
 
 	return energy;
 }

@@ -27,7 +27,6 @@ framework, and interested clients reading the data from it::
        +---------------+  +-----------------+  +---------------+
        | Thermal (IPA) |  | Scheduler (EAS) |  |     Other     |
        +---------------+  +-----------------+  +---------------+
-               |                   | em_cpu_energy()   |
                |                   | em_cpu_get()      |
                +---------+         |         +---------+
                          |         |         |
@@ -98,11 +97,6 @@ performance domain.
 Subsystems interested in the energy model of a CPU can retrieve it using the
 em_cpu_get() API. The energy model tables are allocated once upon creation of
 the performance domains, and kept in memory untouched.
-
-The energy consumed by a performance domain can be estimated using the
-em_cpu_energy() API. The estimation is performed assuming that the schedutil
-CPUfreq governor is in use in case of CPU device. Currently this calculation is
-not provided for other type of devices.
 
 More details about the above APIs can be found in include/linux/energy_model.h.
 
