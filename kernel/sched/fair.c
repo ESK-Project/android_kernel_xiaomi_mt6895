@@ -787,7 +787,7 @@ static inline u64 cfs_rq_min_slice(struct cfs_rq *cfs_rq)
 		min_slice = curr->slice;
 
 	if (root)
-		min_slice = min(min_slice, root->min_slice);
+		min_slice = min_t(u64, min_slice, root->min_slice_ns);
 
 	return min_slice;
 }
@@ -822,32 +822,37 @@ static inline void __min_vruntime_update(struct sched_entity *se, struct rb_node
 /*
  * se->min_vruntime = min(se->vruntime, {left,right}->min_vruntime)
  */
-static inline void __min_slice_update(struct sched_entity *se, struct rb_node *node)
+static inline void update_slice_bounds(struct sched_entity *se, struct rb_node *node)
 {
-	if (node) {
-		struct sched_entity *rse = __node_2_se(node);
+	struct sched_entity *child;
 
-		if (rse->min_slice < se->min_slice)
-			se->min_slice = rse->min_slice;
-	}
+	if (!node)
+		return;
+
+	child = __node_2_se(node);
+	se->min_slice_ns = min(se->min_slice_ns, child->min_slice_ns);
+	se->max_slice_ns = max(se->max_slice_ns, child->max_slice_ns);
 }
 
 static inline bool min_vruntime_update(struct sched_entity *se, bool exit)
 {
 	u64 old_min_vruntime = se->min_vruntime;
-	u64 old_min_slice = se->min_slice;
+	u32 old_min_slice = se->min_slice_ns;
+	u32 old_max_slice = se->max_slice_ns;
 	struct rb_node *node = &se->run_node;
 
 	se->min_vruntime = se->vruntime;
 	__min_vruntime_update(se, node->rb_right);
 	__min_vruntime_update(se, node->rb_left);
 
-	se->min_slice = se->slice;
-	__min_slice_update(se, node->rb_right);
-	__min_slice_update(se, node->rb_left);
+	se->min_slice_ns = min_t(u64, se->slice, U32_MAX);
+	se->max_slice_ns = se->min_slice_ns;
+	update_slice_bounds(se, node->rb_right);
+	update_slice_bounds(se, node->rb_left);
 
 	return se->min_vruntime == old_min_vruntime &&
-	       se->min_slice == old_min_slice;
+	       se->min_slice_ns == old_min_slice &&
+	       se->max_slice_ns == old_max_slice;
 }
 
 RB_DECLARE_CALLBACKS(static, min_vruntime_cb, struct sched_entity,
@@ -861,7 +866,8 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	trace_android_rvh_enqueue_entity(cfs_rq, se);
 	avg_vruntime_add(cfs_rq, se);
 	se->min_vruntime = se->vruntime;
-	se->min_slice = se->slice;
+	se->min_slice_ns = min_t(u64, se->slice, U32_MAX);
+	se->max_slice_ns = se->min_slice_ns;
 	rb_add_augmented_cached(&se->run_node, &cfs_rq->tasks_timeline,
 				__entity_less, &min_vruntime_cb);
 }
@@ -7774,16 +7780,37 @@ static bool __check_pushable_fair_task(struct task_struct *p)
 	return true;
 }
 
-static bool fair_check_pushable_task(struct rq *rq, struct task_struct *p,
-				     struct task_struct *next)
+static bool check_pushable_short_task(struct task_struct *p)
 {
-	if (!__check_pushable_fair_task(p))
+	struct sched_entity *se = &p->se;
+	bool short_slice = false;
+
+	for_each_sched_entity(se) {
+		struct cfs_rq *cfs_rq = cfs_rq_of(se);
+		struct sched_entity *root = __pick_root_entity(cfs_rq);
+		struct sched_entity *curr = cfs_rq->curr;
+
+		if (!se->on_rq || se->sched_delayed || !entity_eligible(cfs_rq, se))
+			return false;
+
+		if ((root && se->slice < root->max_slice_ns) ||
+		    (curr && curr->on_rq && se->slice < curr->slice))
+			short_slice = true;
+	}
+
+	return short_slice;
+}
+
+static bool fair_check_pushable_task(struct rq *rq, struct task_struct *p,
+				    struct task_struct *next)
+{
+	if (!__check_pushable_fair_task(p) || next == p)
 		return false;
 
-	if (next == p)
-		return false;
+	if (next && next->sched_class != p->sched_class)
+		return true;
 
-	return false;
+	return rq->cfs.h_nr_runnable > 1 && check_pushable_short_task(p);
 }
 
 static inline bool has_pushable_fair_tasks(struct rq *rq)
