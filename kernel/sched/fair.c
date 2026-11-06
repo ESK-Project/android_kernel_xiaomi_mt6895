@@ -7891,6 +7891,82 @@ void __init init_fair_push_queue(int cpu)
 	plist_head_init(&per_cpu(fair_pushable_tasks, cpu));
 }
 
+static DEFINE_PER_CPU(struct task_struct *, fair_tick_push_task);
+
+static int fair_tick_push_stop(void *data)
+{
+	struct rq *rq = data, *locked_rq = rq;
+	struct task_struct *p;
+	struct rq_flags rf;
+	int dst_cpu;
+
+	rq_lock_irqsave(rq, &rf);
+	p = per_cpu(fair_tick_push_task, cpu_of(rq));
+	dst_cpu = rq->push_cpu;
+
+	/* The stopper counts as the second runnable task. */
+	if (cpu_of(rq) == smp_processor_id() && cpu_active(cpu_of(rq)) &&
+	    rq->nr_running == 2 && task_rq(p) == rq &&
+	    p->sched_class == &fair_sched_class && !task_running(rq, p) &&
+	    __check_pushable_fair_task(p) && raw_spin_trylock(&p->pi_lock)) {
+		if (is_cpu_allowed(p, dst_cpu)) {
+			update_rq_clock(rq);
+			locked_rq = move_queued_task(rq, &rf, p, dst_cpu, false);
+		}
+		raw_spin_unlock(&p->pi_lock);
+	}
+
+	if (locked_rq != rq) {
+		rq_unlock(locked_rq, &rf);
+		rq_lock(rq, &rf);
+	}
+	per_cpu(fair_tick_push_task, cpu_of(rq)) = NULL;
+	rq->active_balance = 0;
+	rq_unlock_irqrestore(rq, &rf);
+	put_task_struct(p);
+
+	return 0;
+}
+
+static void tick_push_task(struct task_struct *p, struct rq *rq,
+			   struct rq_flags *rf)
+	__releases(rq->lock)
+	__acquires(rq->lock)
+{
+	int cpu = cpu_of(rq), new_cpu;
+	bool queued;
+
+	if (!rf || !sched_push_task_enabled() || rq->active_balance ||
+	    rq->nr_running != 1 || !__check_pushable_fair_task(p) ||
+	    !raw_spin_trylock(&p->pi_lock))
+		return;
+
+	new_cpu = select_task_rq_fair(p, cpu, 0, 0);
+	if (new_cpu != cpu && !is_cpu_allowed(p, new_cpu))
+		new_cpu = cpu;
+	raw_spin_unlock(&p->pi_lock);
+
+	if (new_cpu == cpu)
+		return;
+
+	rq->active_balance = 1;
+	rq->push_cpu = new_cpu;
+	per_cpu(fair_tick_push_task, cpu) = get_task_struct(p);
+
+	rq_unpin_lock(rq, rf);
+	raw_spin_unlock(&rq->lock);
+	queued = stop_one_cpu_nowait(cpu, fair_tick_push_stop, rq,
+				     &rq->active_balance_work);
+	raw_spin_lock(&rq->lock);
+	rq_repin_lock(rq, rf);
+
+	if (!queued) {
+		per_cpu(fair_tick_push_task, cpu) = NULL;
+		rq->active_balance = 0;
+		put_task_struct(p);
+	}
+}
+
 void fair_push_on_switch(struct rq *rq, struct task_struct *prev,
 			 struct task_struct *next)
 {
@@ -11901,7 +11977,10 @@ static void __task_tick_fair(struct rq *rq, struct task_struct *curr,
 		task_tick_numa(rq, curr);
 
 	update_misfit_status(curr, rq);
-	update_overutilized_status(task_rq(curr));
+	update_overutilized_status(rq);
+#ifdef CONFIG_SMP
+	tick_push_task(curr, rq, rf);
+#endif
 }
 
 static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
