@@ -7453,14 +7453,13 @@ static unsigned long cpu_util_next(int cpu, struct task_struct *p, int dst_cpu)
 	if (sched_feat(UTIL_EST)) {
 		util_est = READ_ONCE(cfs_rq->avg.util_est.enqueued);
 
-		/*
-		 * During wake-up, the task isn't enqueued yet and doesn't
-		 * appear in the cfs_rq->avg.util_est.enqueued of any rq,
-		 * so just add it (if needed) to "simulate" what will be
-		 * cpu_util() after the task has been enqueued.
-		 */
-		if (dst_cpu == cpu)
+		if (task_cpu(p) == cpu && task_on_rq_queued(p) &&
+		    !p->se.sched_delayed) {
+			if (dst_cpu != cpu)
+				lsub_positive(&util_est, _task_util_est(p));
+		} else if (dst_cpu == cpu) {
 			util_est += _task_util_est(p);
+		}
 
 		util = max(util, util_est);
 	}
@@ -7815,62 +7814,45 @@ static bool fair_push_task(struct rq *rq)
 	__releases(rq->lock)
 	__acquires(rq->lock)
 {
-	struct task_struct *next_task;
-	int prev_cpu, new_cpu;
+	struct task_struct *p = pick_next_pushable_fair_task(rq);
+	struct rq *new_rq;
 	struct rq_flags rf;
-	struct rq *cur_rq;
+	int new_cpu;
 
-	next_task = pick_next_pushable_fair_task(rq);
-	if (!next_task)
+	if (!p)
 		return false;
 
-	if (!__check_pushable_fair_task(next_task))
+	if (task_rq(p) != rq || p->sched_class != &fair_sched_class ||
+	    task_running(rq, p) || !__check_pushable_fair_task(p) ||
+	    !raw_spin_trylock(&p->pi_lock))
 		return true;
 
-	/* We might release rq lock */
-	get_task_struct(next_task);
+	new_cpu = select_task_rq_fair(p, cpu_of(rq), 0, 0);
+	if (new_cpu == cpu_of(rq) || !is_cpu_allowed(p, new_cpu)) {
+		raw_spin_unlock(&p->pi_lock);
+		return true;
+	}
 
-	prev_cpu = rq->cpu;
-
-	/*
-	 * We need to release rq lock and take both task and rq w/o
-	 * triggering a deadlock.
-	 */
-	raw_spin_unlock(&rq->lock);
-
-	cur_rq = task_rq_lock(next_task, &rf);
-
-	/* Task already migrated */
-	if (cur_rq != rq || next_task->sched_class != &fair_sched_class ||
-	    task_running(rq, next_task) ||
-	    !__check_pushable_fair_task(next_task))
-		goto skip_push;
-
-	if (!plist_node_empty(&next_task->pushable_tasks))
-		goto skip_push;
-
-	new_cpu = select_task_rq_fair(next_task, prev_cpu, 0, 0);
-
-	/* Task doesn't need to migrate */
-	if (new_cpu == prev_cpu || !is_cpu_allowed(next_task, new_cpu))
-		goto skip_push;
-
-	update_rq_clock(cur_rq);
-	cur_rq = move_queued_task(cur_rq, &rf, next_task, new_cpu);
-
-skip_push:
-	task_rq_unlock(cur_rq, next_task, &rf);
-
-	/* Restore rq state */
+	get_task_struct(p);
+	rq_pin_lock(rq, &rf);
+	update_rq_clock(rq);
+	/* Keep the source locked until the task is marked migrating. */
+	new_rq = move_queued_task(rq, &rf, p, new_cpu, false);
+	rq_unlock(new_rq, &rf);
+	raw_spin_unlock(&p->pi_lock);
+	put_task_struct(p);
 	raw_spin_lock(&rq->lock);
-	put_task_struct(next_task);
-
 	return true;
 }
 
 static void fair_push_tasks(struct rq *rq)
 {
-	while (fair_push_task(rq))
+	unsigned int remaining = min(sysctl_sched_nr_migrate, rq->nr_running);
+
+	if (cpu_of(rq) != smp_processor_id())
+		return;
+
+	while (remaining-- && fair_push_task(rq))
 		;
 }
 

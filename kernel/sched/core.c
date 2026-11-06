@@ -1874,7 +1874,8 @@ bool is_cpu_allowed(struct task_struct *p, int cpu)
  * Returns (locked) new rq. Old rq's lock is released.
  */
 struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
-			    struct task_struct *p, int new_cpu)
+			    struct task_struct *p, int new_cpu,
+			    bool vendor_hook)
 {
 	int detached = 0;
 
@@ -1885,7 +1886,8 @@ struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
 	 * pass the rq flags to unpin lock. We expect the
 	 * rq lock to be held after return.
 	 */
-	trace_android_rvh_migrate_queued_task(rq, rf, p, new_cpu, &detached);
+	if (vendor_hook)
+		trace_android_rvh_migrate_queued_task(rq, rf, p, new_cpu, &detached);
 	if (detached)
 		goto attach;
 
@@ -1926,7 +1928,7 @@ static struct rq *__migrate_task(struct rq *rq, struct rq_flags *rf,
 		return rq;
 
 	update_rq_clock(rq);
-	rq = move_queued_task(rq, rf, p, dest_cpu);
+	rq = move_queued_task(rq, rf, p, dest_cpu, true);
 
 	return rq;
 }
@@ -2091,7 +2093,7 @@ static int __set_cpus_allowed_ptr_locked(struct task_struct *p,
 		 * OK, since we're going to drop the lock immediately
 		 * afterwards anyway.
 		 */
-		rq = move_queued_task(rq, rf, p, dest_cpu);
+		rq = move_queued_task(rq, rf, p, dest_cpu, true);
 	}
 out:
 	task_rq_unlock(rq, p, rf);

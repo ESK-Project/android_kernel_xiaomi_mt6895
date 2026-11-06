@@ -1462,7 +1462,8 @@ init_numa_balancing(unsigned long clone_flags, struct task_struct *p)
 DECLARE_STATIC_KEY_FALSE(sched_push_task);
 bool is_cpu_allowed(struct task_struct *p, int cpu);
 struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
-			    struct task_struct *p, int new_cpu);
+			    struct task_struct *p, int new_cpu,
+			    bool vendor_hook);
 void __init init_fair_push_queue(int cpu);
 void fair_push_on_switch(struct rq *rq, struct task_struct *prev,
 			 struct task_struct *next);
