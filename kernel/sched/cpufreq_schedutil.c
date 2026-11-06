@@ -266,9 +266,50 @@ static unsigned int get_next_freq(struct sugov_policy *sg_policy,
  * based on the task model parameters and gives the minimal utilization
  * required to meet deadlines.
  */
-unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
-				 unsigned long max, enum schedutil_type type,
-				 struct task_struct *p)
+static unsigned long uclamp_rq_util_without(struct rq *rq, unsigned long util,
+					   struct task_struct *p)
+{
+#ifdef CONFIG_UCLAMP_TASK
+	unsigned long clamp_value[UCLAMP_CNT];
+	enum uclamp_id id;
+
+	if (!uclamp_is_used())
+		return util;
+
+	lockdep_assert_held(&rq->lock);
+	for (id = 0; id < UCLAMP_CNT; id++) {
+		struct uclamp_bucket *buckets = rq->uclamp[id].bucket;
+		struct uclamp_se *uc = &p->uclamp[id];
+		int bucket;
+
+		clamp_value[id] = uclamp_rq_get(rq, id);
+		if (!uc->active || buckets[uc->bucket_id].tasks != 1 ||
+		    buckets[uc->bucket_id].value < clamp_value[id])
+			continue;
+
+		for (bucket = uc->bucket_id - 1; bucket >= 0; bucket--) {
+			if (buckets[bucket].tasks)
+				break;
+		}
+
+		if (bucket >= 0)
+			clamp_value[id] = buckets[bucket].value;
+		else
+			clamp_value[id] = id == UCLAMP_MIN ? 0 : uc->value;
+	}
+
+	if (clamp_value[UCLAMP_MIN] >= clamp_value[UCLAMP_MAX])
+		return clamp_value[UCLAMP_MIN];
+
+	return clamp(util, clamp_value[UCLAMP_MIN], clamp_value[UCLAMP_MAX]);
+#else
+	return util;
+#endif
+}
+
+static __always_inline unsigned long
+__schedutil_cpu_util(int cpu, unsigned long util_cfs, unsigned long max,
+		     enum schedutil_type type, struct task_struct *p, bool remove)
 {
 	unsigned long dl_util, util, irq;
 	struct rq *rq = cpu_rq(cpu);
@@ -300,8 +341,12 @@ unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
 	 * frequency will be gracefully reduced with the utilization decay.
 	 */
 	util = util_cfs + cpu_util_rt(rq);
-	if (type == FREQUENCY_UTIL)
-		util = uclamp_rq_util_with(rq, util, p);
+	if (type == FREQUENCY_UTIL) {
+		if (remove)
+			util = uclamp_rq_util_without(rq, util, p);
+		else
+			util = uclamp_rq_util_with(rq, util, p);
+	}
 
 	dl_util = cpu_util_dl(rq);
 
@@ -351,7 +396,19 @@ unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
 
 	return min(max, util);
 }
+unsigned long schedutil_cpu_util(int cpu, unsigned long util_cfs,
+				 unsigned long max, enum schedutil_type type,
+				 struct task_struct *p)
+{
+	return __schedutil_cpu_util(cpu, util_cfs, max, type, p, false);
+}
 EXPORT_SYMBOL_GPL(schedutil_cpu_util);
+
+unsigned long schedutil_cpu_util_without(int cpu, unsigned long util_cfs,
+					 unsigned long max, struct task_struct *p)
+{
+	return __schedutil_cpu_util(cpu, util_cfs, max, FREQUENCY_UTIL, p, true);
+}
 
 static void sugov_get_util(struct sugov_cpu *sg_cpu)
 {

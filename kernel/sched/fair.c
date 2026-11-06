@@ -7485,6 +7485,78 @@ static unsigned long cpu_util_next(int cpu, struct task_struct *p, int dst_cpu)
 	return min(util, capacity_orig_of(cpu));
 }
 
+static unsigned long eas_frequency_util(int cpu, struct task_struct *p,
+				       int dst_cpu, unsigned long util,
+				       unsigned long cap)
+{
+	if (cpu != dst_cpu && cpu == task_cpu(p) && task_on_rq_queued(p))
+		return schedutil_cpu_util_without(cpu, util, cap, p);
+
+	return schedutil_cpu_util(cpu, util, cap, FREQUENCY_UTIL,
+				  cpu == dst_cpu ? p : NULL);
+}
+
+struct energy_cpu_stat {
+	unsigned long min_freq;
+	unsigned long max_freq;
+	unsigned long cost;
+	int cpu;
+};
+
+static bool better_energy_cpu(struct task_struct *p, int prev_cpu,
+			      struct sched_domain *sd,
+			      const struct energy_cpu_stat *target,
+			      const struct energy_cpu_stat *best)
+{
+	struct rq *target_rq = cpu_rq(target->cpu);
+	struct rq *best_rq = cpu_rq(best->cpu);
+	bool target_idle = choose_idle_cpu(target->cpu, p);
+	bool best_idle = choose_idle_cpu(best->cpu, p);
+	unsigned int target_running, best_running;
+
+	if (target_idle != best_idle)
+		return target_idle;
+
+	if (target->cpu == prev_cpu || best->cpu == prev_cpu)
+		return target->cpu == prev_cpu;
+
+	target_running = READ_ONCE(target_rq->cfs.h_nr_runnable);
+	best_running = READ_ONCE(best_rq->cfs.h_nr_runnable);
+	if (target_running != best_running)
+		return target_running < best_running;
+
+	return (u64)cpu_runnable(target_rq) * capacity_of(best->cpu) *
+	       sd->imbalance_pct <
+	       (u64)cpu_runnable(best_rq) * capacity_of(target->cpu) * 100;
+}
+
+static void find_pd_cost(struct em_perf_domain *em, unsigned long max_util,
+			 unsigned long cpu_cap, struct energy_cpu_stat *stat,
+			 const struct energy_cpu_stat *best)
+{
+	int last = em->nr_perf_states - 1;
+	unsigned long freq = map_util_freq(max_util, em->table[last].frequency,
+					   cpu_cap);
+	int state, prev;
+
+	if (best->cpu >= 0 && freq <= best->max_freq &&
+	    (freq > best->min_freq || !best->min_freq)) {
+		stat->cost = best->cost;
+		stat->min_freq = best->min_freq;
+		stat->max_freq = best->max_freq;
+		return;
+	}
+
+	for (state = 0; state < last; state++) {
+		if (freq <= em->table[state].frequency)
+			break;
+	}
+	prev = em_pd_get_previous_state(em, state);
+	stat->cost = em->table[state].cost;
+	stat->min_freq = prev >= 0 ? em->table[prev].frequency : 0;
+	stat->max_freq = state == last ? ULONG_MAX : em->table[state].frequency;
+}
+
 /*
  * compute_energy(): Estimates the energy that @pd would consume if @p was
  * migrated to @dst_cpu. compute_energy() predicts what will be the utilization
@@ -7492,7 +7564,7 @@ static unsigned long cpu_util_next(int cpu, struct task_struct *p, int dst_cpu)
  * to compute what would be the energy if we decided to actually migrate that
  * task.
  */
-static long
+static unsigned long
 compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 {
 	struct cpumask *pd_mask = perf_domain_span(pd);
@@ -7512,7 +7584,6 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 	 */
 	for_each_cpu_and(cpu, pd_mask, cpu_online_mask) {
 		unsigned long cpu_util, util_cfs = cpu_util_next(cpu, p, dst_cpu);
-		struct task_struct *tsk = cpu == dst_cpu ? p : NULL;
 
 		/*
 		 * Busy time computation: utilization clamping is not
@@ -7530,8 +7601,7 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 		 * NOTE: in case RT tasks are running, by default the
 		 * FREQUENCY_UTIL's utilization can be max OPP.
 		 */
-		cpu_util = schedutil_cpu_util(cpu, util_cfs, cpu_cap,
-					      FREQUENCY_UTIL, tsk);
+		cpu_util = eas_frequency_util(cpu, p, dst_cpu, util_cfs, cpu_cap);
 		max_util = max(max_util, cpu_util);
 	}
 
@@ -7543,43 +7613,8 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 }
 
 /*
- * find_energy_efficient_cpu(): Find most energy-efficient target CPU for the
- * waking task. find_energy_efficient_cpu() looks for the CPU with maximum
- * spare capacity in each performance domain and uses it as a potential
- * candidate to execute the task. Then, it uses the Energy Model to figure
- * out which of the CPU candidates is the most energy-efficient.
- *
- * The rationale for this heuristic is as follows. In a performance domain,
- * all the most energy efficient CPU candidates (according to the Energy
- * Model) are those for which we'll request a low frequency. When there are
- * several CPUs for which the frequency request will be the same, we don't
- * have enough data to break the tie between them, because the Energy Model
- * only includes active power costs. With this model, if we assume that
- * frequency requests follow utilization (e.g. using schedutil), the CPU with
- * the maximum spare capacity in a performance domain is guaranteed to be among
- * the best candidates of the performance domain.
- *
- * In practice, it could be preferable from an energy standpoint to pack
- * small tasks on a CPU in order to let other CPUs go in deeper idle states,
- * but that could also hurt our chances to go cluster idle, and we have no
- * ways to tell with the current Energy Model if this is actually a good
- * idea or not. So, find_energy_efficient_cpu() basically favors
- * cluster-packing, and spreading inside a cluster. That should at least be
- * a good thing for latency, and this is consistent with the idea that most
- * of the energy savings of EAS come from the asymmetry of the system, and
- * not so much from breaking the tie between identical CPUs. That's also the
- * reason why EAS is enabled in the topology code only for systems where
- * SD_ASYM_CPUCAPACITY is set.
- *
- * NOTE: Forkees are not accepted in the energy-aware wake-up path because
- * they don't have any useful utilization data yet and it's not possible to
- * forecast their impact on energy consumption. Consequently, they will be
- * placed by find_idlest_cpu() on the least loaded CPU, which might turn out
- * to be energy-inefficient in some use-cases. The alternative would be to
- * bias new tasks towards specific types of CPUs first, or to try to infer
- * their util_avg from the parent task, but those heuristics could hurt
- * other use-cases too. So, until someone finds a better way to solve this,
- * let's keep things simple by re-using the existing slow path.
+ * Within each performance domain, prefer the lowest-cost OPP. Compare
+ * candidates across domains using the Android energy estimate.
  */
 static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sync)
 {
@@ -7592,7 +7627,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	unsigned long cpu_cap, util, base_energy = 0;
 	bool boosted, latency_sensitive = false;
 	unsigned int min_exit_lat = UINT_MAX;
-	int cpu, best_energy_cpu = prev_cpu;
+	int cpu, best_energy_cpu = prev_cpu, prev_domain_cpu = prev_cpu;
 	struct cpuidle_state *idle;
 	struct sched_domain *sd;
 	struct perf_domain *pd;
@@ -7635,18 +7670,36 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	target_cap = boosted ? 0 : ULONG_MAX;
 
 	for (; pd; pd = pd->next) {
-		unsigned long cur_delta, spare_cap, max_spare_cap = 0;
+		unsigned long cur_energy, cur_delta, spare_cap;
 		unsigned long rq_util_min, rq_util_max;
-		unsigned long util_min, util_max;
-		unsigned long base_energy_pd;
-		int max_spare_cap_cpu = -1;
+		unsigned long util_min = p_util_min, util_max = p_util_max;
+		unsigned long base_energy_pd, max_util = 0, next_util = 0;
+		unsigned long pd_cap = capacity_orig_of(cpumask_first(perf_domain_span(pd)));
+		int max_util_cpu = -1;
+		unsigned long prev_cost = ULONG_MAX;
+		struct energy_cpu_stat best = { .cpu = -1 };
 
 		/* Compute the 'base' energy of the pd, without @p */
-		base_energy_pd = compute_energy(p, -1, pd);
-		base_energy += base_energy_pd;
+		base_energy_pd = 0;
+		if (!latency_sensitive) {
+			base_energy_pd = compute_energy(p, -1, pd);
+			base_energy += base_energy_pd;
+
+			for_each_cpu_and(cpu, perf_domain_span(pd), cpu_online_mask) {
+				util = eas_frequency_util(cpu, p, -1,
+							 cpu_util_next(cpu, p, -1), pd_cap);
+				if (util > max_util) {
+					next_util = max_util;
+					max_util = util;
+					max_util_cpu = cpu;
+				} else {
+					next_util = max(next_util, util);
+				}
+			}
+		}
 
 		for_each_cpu_and(cpu, perf_domain_span(pd), sched_domain_span(sd)) {
-			if (!cpumask_test_cpu(cpu, p->cpus_ptr))
+			if (!is_cpu_allowed(p, cpu))
 				continue;
 
 			util = cpu_util_next(cpu, p, cpu);
@@ -7683,24 +7736,32 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 			if (!util_fits_cpu(util, util_min, util_max, cpu))
 				continue;
 
-			/* Always use prev_cpu as a candidate. */
-			if (!latency_sensitive && cpu == prev_cpu) {
-				prev_delta = compute_energy(p, prev_cpu, pd);
-				prev_delta -= base_energy_pd;
-				best_delta = min(best_delta, prev_delta);
-			}
+			if (!latency_sensitive) {
+				struct energy_cpu_stat target = { .cpu = cpu };
+				unsigned long other_util = cpu == max_util_cpu ?
+							   next_util : max_util;
+				unsigned long target_util;
 
-			/*
-			 * Find the CPU with the maximum spare capacity in
-			 * the performance domain
-			 */
-			if (spare_cap > max_spare_cap) {
-				max_spare_cap = spare_cap;
-				max_spare_cap_cpu = cpu;
-			}
+				target_util = schedutil_cpu_util(cpu, util, pd_cap,
+								 FREQUENCY_UTIL, p);
+				find_pd_cost(pd->em_pd, max(other_util, target_util),
+					     pd_cap, &target, &best);
+				if (cpu == prev_cpu) {
+					prev_cost = target.cost;
+					cur_energy = compute_energy(p, cpu, pd);
+					prev_delta = cur_energy > base_energy_pd ?
+						cur_energy - base_energy_pd : 0;
+					best_delta = min(best_delta, prev_delta);
+				}
 
-			if (!latency_sensitive)
+				if (best.cpu < 0 ||
+				    target.cost < best.cost ||
+				    (target.cost == best.cost &&
+				     better_energy_cpu(p, prev_cpu, sd, &target, &best)))
+					best = target;
+
 				continue;
+			}
 
 			if (idle_cpu(cpu)) {
 				cpu_cap = capacity_orig_of(cpu);
@@ -7723,14 +7784,15 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 			}
 		}
 
-		/* Evaluate the energy impact of using this CPU. */
-		if (!latency_sensitive && max_spare_cap_cpu >= 0 &&
-						max_spare_cap_cpu != prev_cpu) {
-			cur_delta = compute_energy(p, max_spare_cap_cpu, pd);
-			cur_delta -= base_energy_pd;
+		if (best.cpu >= 0 && best.cpu != prev_cpu) {
+			cur_energy = compute_energy(p, best.cpu, pd);
+			cur_delta = cur_energy > base_energy_pd ?
+				    cur_energy - base_energy_pd : 0;
+			if (best.cost == prev_cost && cur_delta <= prev_delta)
+				prev_domain_cpu = best.cpu;
 			if (cur_delta < best_delta) {
 				best_delta = cur_delta;
-				best_energy_cpu = max_spare_cap_cpu;
+				best_energy_cpu = best.cpu;
 			}
 		}
 	}
@@ -7750,7 +7812,7 @@ unlock:
 	if ((prev_delta - best_delta) > ((prev_delta + base_energy) >> 4))
 		return best_energy_cpu;
 
-	return prev_cpu;
+	return prev_domain_cpu;
 
 fail:
 	rcu_read_unlock();
