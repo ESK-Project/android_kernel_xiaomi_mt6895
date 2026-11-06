@@ -7512,10 +7512,16 @@ static bool better_energy_cpu(struct task_struct *p, int prev_cpu,
 	struct rq *best_rq = cpu_rq(best->cpu);
 	bool target_idle = choose_idle_cpu(target->cpu, p);
 	bool best_idle = choose_idle_cpu(best->cpu, p);
+	bool target_first, best_first;
 	unsigned int target_running, best_running;
 
 	if (target_idle != best_idle)
 		return target_idle;
+
+	target_first = slice_fits_rq(p, target->cpu);
+	best_first = slice_fits_rq(p, best->cpu);
+	if (target_first != best_first)
+		return target_first;
 
 	if (target->cpu == prev_cpu || best->cpu == prev_cpu)
 		return target->cpu == prev_cpu;
