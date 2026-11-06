@@ -1840,7 +1840,7 @@ EXPORT_SYMBOL_GPL(check_preempt_curr);
  * Per-CPU kthreads are allowed to run on !active && online CPUs, see
  * __set_cpus_allowed_ptr() and select_fallback_rq().
  */
-static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
+bool is_cpu_allowed(struct task_struct *p, int cpu)
 {
 	if (!cpumask_test_cpu(cpu, p->cpus_ptr))
 		return false;
@@ -1873,8 +1873,8 @@ static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
  *
  * Returns (locked) new rq. Old rq's lock is released.
  */
-static struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
-				   struct task_struct *p, int new_cpu)
+struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
+			    struct task_struct *p, int new_cpu)
 {
 	int detached = 0;
 
@@ -4820,6 +4820,9 @@ static void __sched notrace __schedule(bool preempt)
 	}
 
 	next = pick_next_task(rq, prev, &rf);
+#ifdef CONFIG_SMP
+	fair_push_on_switch(rq, prev, next);
+#endif
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
 
@@ -7629,6 +7632,9 @@ void __init sched_init(void)
 		rq->calc_load_active = 0;
 		rq->calc_load_update = jiffies + LOAD_FREQ;
 		init_cfs_rq(&rq->cfs);
+#ifdef CONFIG_SMP
+		init_fair_push_queue(i);
+#endif
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
 #ifdef CONFIG_FAIR_GROUP_SCHED
