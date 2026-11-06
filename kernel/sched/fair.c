@@ -6238,7 +6238,15 @@ static void decay_entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se,
 
 	struct rq *rq = rq_of(cfs_rq);
 
-	if (vlag <= 0 || (flags & ENQUEUE_MIGRATED))
+	if (vlag <= 0)
+		return;
+
+	if (rq->curr == rq->idle) {
+		se->vlag = 0;
+		return;
+	}
+
+	if (flags & ENQUEUE_MIGRATED)
 		return;
 
 	if (se->vlag_seq != rq->cfs.idle_seq) {
