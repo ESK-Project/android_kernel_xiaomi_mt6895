@@ -697,6 +697,7 @@ void update_entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	SCHED_WARN_ON(!se->on_rq);
 
 	se->vlag = entity_lag(avg_vruntime(cfs_rq), se);
+	se->vlag_seq = rq_of(cfs_rq)->cfs.idle_seq;
 }
 
 /*
@@ -6235,10 +6236,17 @@ static void decay_entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se,
 	s64 delta_exec, vlag = se->vlag;
 	unsigned long load, weight;
 
+	struct rq *rq = rq_of(cfs_rq);
+
 	if (vlag <= 0 || (flags & ENQUEUE_MIGRATED))
 		return;
 
-	delta_exec = rq_clock_task(rq_of(cfs_rq)) - se->exec_start;
+	if (se->vlag_seq != rq->cfs.idle_seq) {
+		se->vlag = 0;
+		return;
+	}
+
+	delta_exec = rq_clock_task(rq) - se->exec_start;
 	if (delta_exec <= 0)
 		return;
 
@@ -6502,6 +6510,8 @@ static int __dequeue_entities(struct rq *rq, struct sched_entity *se,
 	}
 
 	sub_nr_running(rq, h_nr_queued);
+	if (!(flags & DEQUEUE_SAVE) && h_nr_queued && !rq->cfs.h_nr_queued)
+		WRITE_ONCE(rq->cfs.idle_seq, rq->cfs.idle_seq + 1);
 
 	/* balance early to pull high priority tasks */
 	if (unlikely(!was_sched_idle && sched_idle_rq(rq)))

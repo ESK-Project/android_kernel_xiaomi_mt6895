@@ -473,6 +473,7 @@ struct sched_entity {
 	unsigned char			sched_delayed;
 	unsigned char			rel_deadline;
 	unsigned char			custom_slice;
+	u32				vlag_seq;
 
 	u64				exec_start;
 	u64				sum_exec_runtime;
