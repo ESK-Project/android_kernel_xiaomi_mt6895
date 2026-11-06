@@ -7930,6 +7930,12 @@ void __init init_fair_push_queue(int cpu)
 	plist_head_init(&per_cpu(fair_pushable_tasks, cpu));
 }
 
+static void fair_add_pushable_short(struct rq *rq, struct task_struct *p)
+{
+	if (sched_push_task_enabled() && __check_pushable_fair_task(p))
+		__fair_add_pushable_task(rq, p);
+}
+
 static DEFINE_PER_CPU(struct task_struct *, fair_tick_push_task);
 
 static int fair_tick_push_stop(void *data)
@@ -8198,7 +8204,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	int next_buddy_marked = 0;
 	bool cse_is_idle, pse_is_idle;
 	bool preempt = false, nopreempt = false;
-	bool preempt_short = false;
+	bool preempt_short = false, short_slice = false;
 
 	if (unlikely(se == pse))
 		return;
@@ -8267,7 +8273,8 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (nopreempt)
 		return;
 
-	preempt_short = sched_feat(PREEMPT_SHORT) && pse->slice < se->slice;
+	short_slice = sched_feat(PREEMPT_SHORT) && pse->slice < se->slice;
+	preempt_short = short_slice;
 	if (__pick_eevdf(cfs_rq, !preempt_short) == pse)
 		goto preempt;
 
@@ -8279,6 +8286,11 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 preempt:
 	if (preempt_short)
 		cancel_protect_slice(se);
+
+#ifdef CONFIG_SMP
+	if (short_slice)
+		fair_add_pushable_short(rq, p);
+#endif
 
 	resched_curr(rq);
 }
