@@ -6229,6 +6229,38 @@ static void requeue_delayed_entity(struct sched_entity *se)
 	clear_delayed(se);
 }
 
+static void decay_entity_lag(struct cfs_rq *cfs_rq, struct sched_entity *se,
+			     int flags)
+{
+	s64 delta_exec, vlag = se->vlag;
+	unsigned long load, weight;
+
+	if (vlag <= 0 || (flags & ENQUEUE_MIGRATED))
+		return;
+
+	delta_exec = rq_clock_task(rq_of(cfs_rq)) - se->exec_start;
+	if (delta_exec <= 0)
+		return;
+
+	if (delta_exec >> 32) {
+		se->vlag = 0;
+		return;
+	}
+
+#ifdef CONFIG_SMP
+	load = cfs_rq_load_avg(cfs_rq);
+	load -= min(load, se->avg.load_avg);
+#else
+	load = scale_load_down(cfs_rq->load.weight);
+#endif
+	if (load) {
+		weight = scale_load_down(se->load.weight);
+		delta_exec = div64_long(delta_exec * weight, load + weight);
+	}
+
+	se->vlag = max_t(s64, 0, vlag - calc_delta_fair(delta_exec, se));
+}
+
 /*
  * The enqueue_task method is called before nr_running is
  * increased. Here we update the fair scheduling stats and
@@ -6268,6 +6300,9 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	trace_android_rvh_set_iowait(p, &should_iowait_boost);
 	if (should_iowait_boost)
 		cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
+
+	if ((flags & ENQUEUE_WAKEUP) && !se->on_rq)
+		decay_entity_lag(cfs_rq_of(se), se, flags);
 
 	if (task_new)
 		h_nr_delayed = !!se->sched_delayed;
