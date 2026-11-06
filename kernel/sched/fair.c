@@ -7186,6 +7186,18 @@ static inline bool asym_fits_cpu(unsigned long util,
 	return true;
 }
 
+static int idle_rq_without(struct rq *rq, struct task_struct *p);
+static unsigned int task_running_on_cpu(int cpu, struct task_struct *p);
+
+static bool choose_idle_cpu(int cpu, struct task_struct *p)
+{
+	struct rq *rq = cpu_rq(cpu);
+
+	return available_idle_cpu(cpu) || sched_idle_cpu(cpu) ||
+	       (READ_ONCE(rq->nr_running) == 1 && task_running_on_cpu(cpu, p) &&
+		idle_rq_without(rq, p));
+}
+
 /*
  * Try and locate an idle core/thread in the LLC cache domain.
  */
@@ -7206,7 +7218,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 		util_max = uclamp_eff_value(p, UCLAMP_MAX);
 	}
 
-	if ((available_idle_cpu(target) || sched_idle_cpu(target)) &&
+	if (choose_idle_cpu(target, p) &&
 	    asym_fits_cpu(task_util, util_min, util_max, target))
 		return target;
 
@@ -7214,7 +7226,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	 * If the previous CPU is cache affine and idle, don't be stupid:
 	 */
 	if (prev != target && cpus_share_cache(prev, target) &&
-	    (available_idle_cpu(prev) || sched_idle_cpu(prev)) &&
+	    choose_idle_cpu(prev, p) &&
 	    asym_fits_cpu(task_util, util_min, util_max, prev))
 		return prev;
 
@@ -7226,7 +7238,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	 * essentially a sync wakeup. An obvious example of this
 	 * pattern is IO completions.
 	 */
-	if (is_per_cpu_kthread(current) &&
+	if (!task_on_rq_queued(p) && is_per_cpu_kthread(current) &&
 	    in_task() &&
 	    prev == smp_processor_id() &&
 	    this_rq()->nr_running <= 1 &&
@@ -7239,7 +7251,7 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
 	if (recent_used_cpu != prev &&
 	    recent_used_cpu != target &&
 	    cpus_share_cache(recent_used_cpu, target) &&
-	    (available_idle_cpu(recent_used_cpu) || sched_idle_cpu(recent_used_cpu)) &&
+	    choose_idle_cpu(recent_used_cpu, p) &&
 	    cpumask_test_cpu(p->recent_used_cpu, p->cpus_ptr) &&
 	    asym_fits_cpu(task_util, util_min, util_max, recent_used_cpu)) {
 		/*
@@ -9866,23 +9878,20 @@ static unsigned int task_running_on_cpu(int cpu, struct task_struct *p)
 }
 
 /**
- * idle_cpu_without - would a given CPU be idle without p ?
- * @cpu: the processor on which idleness is tested.
+ * idle_rq_without - would a given CPU be idle without p ?
+ * @rq: the runqueue on which idleness is tested.
  * @p: task which should be ignored.
  *
  * Return: 1 if the CPU would be idle. 0 otherwise.
  */
-static int idle_cpu_without(int cpu, struct task_struct *p)
-{
-	struct rq *rq = cpu_rq(cpu);
-
-	if (rq->curr != rq->idle && rq->curr != p)
+static int idle_rq_without(struct rq *rq, struct task_struct *p)
+{	if (rq->curr != rq->idle && rq->curr != p)
 		return 0;
 
 	/*
 	 * rq->nr_running can't be used but an updated version without the
 	 * impact of p on cpu must be used instead. The updated nr_running
-	 * be computed and tested before calling idle_cpu_without().
+	 * be computed and tested before calling idle_rq_without().
 	 */
 
 #ifdef CONFIG_SMP
@@ -9927,9 +9936,9 @@ static inline void update_sg_wakeup_stats(struct sched_domain *sd,
 		sgs->sum_nr_running += nr_running;
 
 		/*
-		 * No need to call idle_cpu_without() if nr_running is not 0
+		 * No need to call idle_rq_without() if nr_running is not 0
 		 */
-		if (!nr_running && idle_cpu_without(i, p))
+		if (!nr_running && idle_rq_without(rq, p))
 			sgs->idle_cpus++;
 
 		/* Check if task fits in the CPU */
