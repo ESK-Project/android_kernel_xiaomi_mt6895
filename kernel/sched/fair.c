@@ -792,6 +792,17 @@ static inline u64 cfs_rq_min_slice(struct cfs_rq *cfs_rq)
 	return min_slice;
 }
 
+static void update_rq_min_slice(struct rq *rq)
+{
+#ifdef CONFIG_SMP
+	u64 slice = cfs_rq_min_slice(&rq->cfs);
+	u32 min_slice = slice == U64_MAX ? 0 : min_t(u64, slice, U32_MAX);
+
+	if (READ_ONCE(rq->min_slice) != min_slice)
+		WRITE_ONCE(rq->min_slice, min_slice);
+#endif
+}
+
 static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 {
 	return entity_before(__node_2_se(a), __node_2_se(b));
@@ -6304,6 +6315,7 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 	if (flags & ENQUEUE_DELAYED) {
 		requeue_delayed_entity(se);
+		update_rq_min_slice(rq);
 		return;
 	}
 
@@ -6418,6 +6430,7 @@ enqueue_throttle:
 	}
 
 	assert_list_leaf_cfs_rq(rq);
+	update_rq_min_slice(rq);
 
 	hrtick_update(rq);
 }
@@ -6527,6 +6540,7 @@ static int __dequeue_entities(struct rq *rq, struct sched_entity *se,
 
 	ret = 1;
 out:
+	update_rq_min_slice(rq);
 	if (p && task_delayed) {
 		SCHED_WARN_ON(!task_sleep);
 		SCHED_WARN_ON(p->on_rq != TASK_ON_RQ_QUEUED);

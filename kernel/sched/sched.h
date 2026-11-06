@@ -952,6 +952,7 @@ struct rq {
 
 #ifdef CONFIG_SMP
 	unsigned int		ttwu_pending;
+	u32			min_slice;
 #endif
 	u64			nr_switches;
 
