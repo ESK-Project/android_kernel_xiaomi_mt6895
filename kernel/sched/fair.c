@@ -11885,7 +11885,8 @@ static void rq_offline_fair(struct rq *rq)
  * and everything must be accessed through the @rq and @curr passed in
  * parameters.
  */
-static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
+static void __task_tick_fair(struct rq *rq, struct task_struct *curr,
+			     int queued, struct rq_flags *rf)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &curr->se;
@@ -11902,6 +11903,19 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 	update_misfit_status(curr, rq);
 	update_overutilized_status(task_rq(curr));
 }
+
+static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
+{
+	__task_tick_fair(rq, curr, queued, NULL);
+}
+
+#ifdef CONFIG_SMP
+void task_tick_fair_local(struct rq *rq, struct task_struct *curr,
+			  struct rq_flags *rf)
+{
+	__task_tick_fair(rq, curr, 0, rf);
+}
+#endif
 
 /*
  * called on fork with the child task as argument from the parent's context

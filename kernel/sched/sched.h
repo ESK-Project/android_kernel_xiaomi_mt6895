@@ -1460,6 +1460,8 @@ init_numa_balancing(unsigned long clone_flags, struct task_struct *p)
 #ifdef CONFIG_SMP
 
 DECLARE_STATIC_KEY_FALSE(sched_push_task);
+void task_tick_fair_local(struct rq *rq, struct task_struct *curr,
+			  struct rq_flags *rf);
 bool is_cpu_allowed(struct task_struct *p, int cpu);
 struct rq *move_queued_task(struct rq *rq, struct rq_flags *rf,
 			    struct task_struct *p, int new_cpu,
