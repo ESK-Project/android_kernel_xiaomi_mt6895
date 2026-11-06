@@ -7784,6 +7784,10 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 		detach_entity_cfs_rq(&p->se);
 
 	} else {
+		if (READ_ONCE(p->state) == TASK_WAKING && p->se.vlag > 0 &&
+		    p->se.vlag_seq != READ_ONCE(task_rq(p)->cfs.idle_seq))
+			p->se.vlag = 0;
+
 		/*
 		 * We are supposed to update the task to "current" time, then
 		 * its up to date and ready to go to new CPU/cfs_rq. But we
