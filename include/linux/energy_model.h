@@ -102,6 +102,11 @@ int em_dev_register_perf_domain(struct device *dev, unsigned int nr_states,
 				bool milliwatts);
 void em_dev_unregister_perf_domain(struct device *dev);
 
+static inline int em_pd_get_previous_state(struct em_perf_domain *pd, int idx)
+{
+	return idx > 0 && idx < pd->nr_perf_states ? idx - 1 : -1;
+}
+
 /**
  * em_cpu_energy() - Estimates the energy consumed by the CPUs of a
 		performance domain
@@ -224,6 +229,10 @@ static inline struct em_perf_domain *em_cpu_get(int cpu)
 static inline struct em_perf_domain *em_pd_get(struct device *dev)
 {
 	return NULL;
+}
+static inline int em_pd_get_previous_state(struct em_perf_domain *pd, int idx)
+{
+	return -1;
 }
 static inline unsigned long em_cpu_energy(struct em_perf_domain *pd,
 			unsigned long max_util, unsigned long sum_util)
