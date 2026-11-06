@@ -1822,8 +1822,13 @@ void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
 {
 	if (p->sched_class == rq->curr->sched_class)
 		rq->curr->sched_class->check_preempt_curr(rq, p, flags);
-	else if (p->sched_class > rq->curr->sched_class)
+	else if (p->sched_class > rq->curr->sched_class) {
 		resched_curr(rq);
+#ifdef CONFIG_SMP
+		if (rq->curr == rq->idle && p->sched_class == &fair_sched_class)
+			fair_queue_idle_wake(rq, p);
+#endif
+	}
 
 	/*
 	 * A queue event has occurred, and we're going to schedule.  In

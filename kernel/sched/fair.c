@@ -8009,6 +8009,24 @@ static void fair_add_pushable_short(struct rq *rq, struct task_struct *p)
 		__fair_add_pushable_task(rq, p);
 }
 
+void fair_queue_idle_wake(struct rq *rq, struct task_struct *p)
+{
+	struct sched_entity *se = &p->se;
+
+	if (!sched_push_task_enabled() || rq->cfs.h_nr_runnable < 2)
+		return;
+
+	if (!__check_pushable_fair_task(p))
+		return;
+
+	for_each_sched_entity(se) {
+		if (!entity_eligible(cfs_rq_of(se), se))
+			return;
+	}
+
+	fair_add_pushable_short(rq, p);
+}
+
 static DEFINE_PER_CPU(struct task_struct *, fair_tick_push_task);
 
 static int fair_tick_push_stop(void *data)
