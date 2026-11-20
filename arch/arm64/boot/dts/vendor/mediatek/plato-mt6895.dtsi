@@ -201,10 +201,10 @@ this file is only for attribution of plato
 };
 
 &u2port0 {
-	mediatek,eye-vrt = <5>;
-	mediatek,eye-term = <6>;
-	mediatek,rev6 = <3>;
-	mediatek,discth = <0xf>;
+	mediatek,eye-vrt = <7>;
+	mediatek,eye-term = <7>;
+	mediatek,rev6 = <2>;
+	mediatek,discth = <0xc>;
 };
 
 &disp_ccorr0_0 {
@@ -492,10 +492,10 @@ this file is only for attribution of plato
 		usb_charger_current = <500000>;
 		ac_charger_current = <1700000>;
 		ac_charger_input_current = <1700000>;
-		non_std_ac_charger_current = <500000>;
+		non_std_ac_charger_current = <1500000>;
 		charging_host_charger_current = <1600000>;
 		ta_ac_charger_current = <3000000>;
-		pd_charger_current = <500000>;
+		pd_charger_current = <1500000>;
 		pre_charger_current = <350000>;
 
 		/* battery temperature protection */

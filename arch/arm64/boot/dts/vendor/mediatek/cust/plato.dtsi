@@ -28,11 +28,7 @@
 
 &gpio_usage_mapping {
 	GPIO_FDD_BAND_SUPPORT_DETECT_1ST_PIN = <&pio 10 0>;
-    GPIO_FDD_BAND_SUPPORT_DETECT_2ND_PIN = <&pio 11 0>;
-    GPIO_FDD_BAND_SUPPORT_DETECT_3RD_PIN = <&pio 12 0>;
-    GPIO_FDD_BAND_SUPPORT_DETECT_4TH_PIN = <&pio 13 0>;
 	GPIO_SIM1_HOT_PLUG = <&pio 42 0>;
-	GPIO_SIM2_HOT_PLUG = <&pio 43 0>;
 	GPIO_SIM2_SCLK = <&pio 44 0>;
 	GPIO_SIM2_SRST = <&pio 45 0>;
 	GPIO_SIM2_SIO = <&pio 46 0>;
@@ -328,6 +324,12 @@
 	status = "okay";
 };
 
+&fingerprint {
+	interrupt-parent = <&pio>;
+	interrupts = <136 IRQ_TYPE_EDGE_RISING>;
+	status = "okay";
+};
+
 &rt5133_eint {
 	interrupt-parent = <&pio>;
 	interrupts = <141 IRQ_TYPE_EDGE_FALLING>;
@@ -342,21 +344,11 @@
 
 &md1_sim1_hot_plug_eint {
 	compatible = "mediatek,md1_sim1_hot_plug_eint-eint";
-	interrupts = <0 IRQ_TYPE_LEVEL_HIGH>;
+	interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
 	debounce = <0 500000>;
 	dedicated = <0 0>;
 	src_pin = <0 1>;
 	sockettype = <0 0>;
-	status = "okay";
-};
-
-&md1_sim2_hot_plug_eint {
-	compatible = "mediatek,md1_sim2_hot_plug_eint-eint";
-	interrupts = <1 IRQ_TYPE_LEVEL_HIGH>;
-	debounce = <1 500000>;
-	dedicated = <1 0>;
-	src_pin = <1 2>;
-	sockettype = <1 0>;
 	status = "okay";
 };
 
