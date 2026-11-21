@@ -35,7 +35,6 @@ endif
 obj-$(CONFIG_MTK_CMDQ_MBOX_EXT) += mtk-cmdq-drv-ext.o
 mtk-cmdq-drv-ext-y := mtk-cmdq-mailbox-ext.o mtk-cmdq-helper-ext.o cmdq-util.o
 
-obj-$(CONFIG_MTK_CMDQ_MBOX_EXT) += cmdq-test.o
 
 ifneq ($(wildcard $(srctree)/$(src)/cmdq-platform-mt6873.c),)
 obj-$(CONFIG_MTK_CMDQ_MBOX_EXT) += cmdq-platform-mt6873.o
