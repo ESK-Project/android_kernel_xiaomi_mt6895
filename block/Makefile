@@ -24,14 +24,8 @@ obj-$(CONFIG_MQ_IOSCHED_DEADLINE)	+= mq-deadline.o
 mq-deadline-y += mq-deadline-main.o
 mq-deadline-$(CONFIG_MQ_IOSCHED_DEADLINE_CGROUP)+= mq-deadline-cgroup.o
 obj-$(CONFIG_MQ_IOSCHED_KYBER)	+= kyber-iosched.o
-obj-$(CONFIG_MQ_IOSCHED_ADIOS)	+= adios.o
-CFLAGS_adios.o := -Wno-gcc-compat -Wno-declaration-after-statement
 bfq-y				:= bfq-iosched.o bfq-wf2q.o bfq-cgroup.o
 obj-$(CONFIG_IOSCHED_BFQ)	+= bfq.o
-
-ssg-$(CONFIG_MQ_IOSCHED_SSG)	:= ssg-iosched.o
-ssg-$(CONFIG_MQ_IOSCHED_SSG_CGROUP)	+= ssg-cgroup.o
-obj-$(CONFIG_MQ_IOSCHED_SSG)	+= ssg.o
 
 obj-$(CONFIG_BLK_CMDLINE_PARSER)	+= cmdline-parser.o
 obj-$(CONFIG_BLK_DEV_INTEGRITY) += bio-integrity.o blk-integrity.o
