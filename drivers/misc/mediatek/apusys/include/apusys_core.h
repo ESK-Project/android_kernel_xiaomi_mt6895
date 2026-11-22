@@ -71,8 +71,8 @@ static int (*apusys_init_func[])(struct apusys_core_info *) = {
  */
 static void (*apusys_exit_func[])(void) = {
 	apu_rproc_exit,
-#if IS_ENABLED(CONFIG_MTK_APUSYS_DEBUG)
 	mvpu_exit,
+#if IS_ENABLED(CONFIG_MTK_APUSYS_DEBUG)
 	debug_exit,
 #endif
 #if IS_ENABLED(CONFIG_MTK_APUSYS_VPU)

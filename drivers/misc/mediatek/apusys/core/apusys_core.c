@@ -38,7 +38,9 @@ static void destroy_dbg_root(void)
 static int __init apusys_init(void)
 {
 	int i = 0, j = 0, ret = 0;
-	int func_num = sizeof(apusys_init_func)/sizeof(int *);
+	int func_num = ARRAY_SIZE(apusys_init_func);
+
+	BUILD_BUG_ON(ARRAY_SIZE(apusys_init_func) != ARRAY_SIZE(apusys_exit_func));
 
 	/* init apusys_dev */
 	create_dbg_root();
@@ -53,7 +55,7 @@ static int __init apusys_init(void)
 			pr_info("init function(%d) fail(%d)", i, ret);
 
 			/* exit device */
-			for (j = i-1; j >= 0; j--)
+			for (j = func_num - i; j < func_num; j++)
 				apusys_exit_func[j]();
 
 			destroy_dbg_root();
@@ -67,7 +69,7 @@ static int __init apusys_init(void)
 static void __exit apusys_exit(void)
 {
 	int i = 0;
-	int func_num = sizeof(apusys_init_func)/sizeof(int *);
+	int func_num = ARRAY_SIZE(apusys_exit_func);
 
 	/* call release func */
 	for (i = 0; i < func_num; i++) {
