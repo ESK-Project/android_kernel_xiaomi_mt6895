@@ -78,8 +78,8 @@ struct NETWORK_SELECTION_POLICY_BY_BAND {
 
 #if (CFG_SUPPORT_AVOID_DESENSE == 1)
 struct WFA_DESENSE_CHANNEL_LIST {
-	int8_t ucChLowerBound;
-	int8_t ucChUpperBound;
+	uint8_t ucChLowerBound;
+	uint8_t ucChUpperBound;
 };
 
 extern const struct WFA_DESENSE_CHANNEL_LIST desenseChList[BAND_NUM];

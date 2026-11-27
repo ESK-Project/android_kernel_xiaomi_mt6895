@@ -428,9 +428,9 @@ const char *gTx_Pwr_Limit_Element[]
 	},
 };
 
-static const int8_t gTx_Pwr_Limit_2g_Ch[] = {
+static const uint8_t gTx_Pwr_Limit_2g_Ch[] = {
 	1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
-static const int8_t gTx_Pwr_Limit_5g_Ch[] = {
+static const uint8_t gTx_Pwr_Limit_5g_Ch[] = {
 	36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 100, 102,
 	104, 106, 108, 110, 112, 114, 116, 118, 120, 122, 124, 126, 128, 132,
 	134, 136, 138, 140, 142, 144, 149, 151, 153, 155, 157, 159, 161, 165};
@@ -3907,7 +3907,7 @@ rlmDomainInitTxPwrLimitData(struct ADAPTER *prAdapter)
 	uint8_t ch_idx = 0;
 	uint8_t band_idx = 0;
 	uint8_t ch_num = 0;
-	const int8_t *prChannelList = NULL;
+	const uint8_t *prChannelList = NULL;
 	struct TX_PWR_LIMIT_DATA *pTxPwrLimitData = NULL;
 	struct CHANNEL_TX_PWR_LIMIT *prChTxPwrLimit = NULL;
 
@@ -3981,7 +3981,7 @@ rlmDomainSendTxPwrLimitCmd(struct ADAPTER *prAdapter,
 	uint8_t ch_cnt = 0;
 	uint8_t ch_idx = 0;
 	uint8_t band_idx = 0;
-	const int8_t *prChannelList = NULL;
+	const uint8_t *prChannelList = NULL;
 	uint32_t rStatus;
 	uint32_t u4SetQueryInfoLen;
 	uint32_t u4SetCmdTableMaxSize[KAL_NUM_BANDS] = {0};
@@ -4124,7 +4124,7 @@ u_int32_t rlmDomainInitTxPwrLimitPerRateCmd(
 	uint8_t ch_cnt = 0;
 	uint8_t ch_idx = 0;
 	uint8_t band_idx = 0;
-	const int8_t *prChannelList = NULL;
+	const uint8_t *prChannelList = NULL;
 	uint32_t u4SetCmdTableMaxSize[KAL_NUM_BANDS] = {0};
 	uint32_t u4SetCountryTxPwrLimitCmdSize =
 		sizeof(struct CMD_SET_TXPOWER_COUNTRY_TX_POWER_LIMIT_PER_RATE);
@@ -4282,7 +4282,7 @@ u_int32_t rlmDomainInitTxBfBackoffCmd(
 	uint8_t ucBandIdx = 0;
 	uint8_t ucAisIdx = 0;
 	uint8_t ucCnt = 0;
-	const int8_t *prChannelList = NULL;
+	const uint8_t *prChannelList = NULL;
 	uint32_t u4SetCmdSize = sizeof(struct CMD_TXPWR_TXBF_SET_BACKOFF);
 	struct CMD_TXPWR_TXBF_CHANNEL_BACKOFF *prChTxBfBackoff = NULL;
 
