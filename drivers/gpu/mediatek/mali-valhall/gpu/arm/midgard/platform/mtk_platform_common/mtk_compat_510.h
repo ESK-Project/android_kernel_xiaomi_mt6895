@@ -10,6 +10,7 @@
 #ifndef _MTK_COMPAT_510_H_
 #define _MTK_COMPAT_510_H_
 
+#include <linux/minmax.h>
 #include <linux/types.h>
 #include <ged_dvfs.h>
 #include <mtk_gpufreq.h>
