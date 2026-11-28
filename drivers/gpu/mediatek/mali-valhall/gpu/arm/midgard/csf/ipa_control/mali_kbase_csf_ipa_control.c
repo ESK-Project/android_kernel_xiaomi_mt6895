@@ -241,6 +241,18 @@ static inline void calc_prfcnt_delta(struct kbase_device *kbdev,
 
 	delta_value *= prfcnt->scaling_factor;
 
+	/* MTK: this SoC has no DT clock for mali; refresh rate from gpufreq */
+	if (kbdev->csf.ipa_control.cur_gpu_rate == 0) {
+		extern u32 mtk_common_get_current_rate_hz(void);
+		extern void mtk_common_set_kbdev(struct kbase_device *kbdev);
+		extern void mtk_dvfs_policy_start(void);
+
+		mtk_common_set_kbdev(kbdev);
+		mtk_dvfs_policy_start();
+		kbdev->csf.ipa_control.cur_gpu_rate =
+			mtk_common_get_current_rate_hz();
+	}
+
 	if (kbdev->csf.ipa_control.cur_gpu_rate == 0) {
 		static bool warned;
 

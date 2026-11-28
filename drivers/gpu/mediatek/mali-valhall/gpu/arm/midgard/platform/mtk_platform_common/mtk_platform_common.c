@@ -4,6 +4,7 @@
  */
 
 #include <mali_kbase.h>
+#include "mtk_compat_510.h"
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
 #include <linux/sysfs.h>
@@ -41,8 +42,8 @@
 #if IS_ENABLED(CONFIG_MALI_MTK_PROC_FS)
 #include <linux/proc_fs.h>
 
-#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
 #include <platform/mtk_platform_common/mtk_platform_dvfs.h>
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
 #if IS_ENABLED(CONFIG_MALI_MTK_GPU_DVFS_HINT_26M_LOADING)
 #include <platform/mtk_platform_common/mtk_platform_dvfs_hint_26m_perf_cnting.h>
 #endif /* CONFIG_MALI_MTK_GPU_DVFS_HINT_26M_LOADING */
@@ -54,10 +55,12 @@
 #include <mtk_gpu_power_model_sspm_ipi.h>
 #endif /* CONFIG_MALI_MTK_GPU_PMU */
 
+#endif /* CONFIG_MALI_MTK_PROC_FS */
+
 /* name of the proc root dir */
 #define	PROC_ROOT "mtk_mali"
+/* proc root dir entry, used by CONFIG_PROC_FS paths */
 static struct proc_dir_entry *proc_root;
-#endif /* CONFIG_MALI_MTK_PROC_FS */
 
 #if IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ_GOVERNOR)
 #include <platform/mtk_platform_common/mtk_platform_devfreq_governor.h>
@@ -125,6 +128,14 @@ struct kbase_device *mtk_common_get_kbdev(void)
 {
 	return mali_kbdev;
 }
+
+/* mtk_common_device_init() may be compiled out (CONFIG_MALI_MTK_COMMON),
+ * which leaves mali_kbdev NULL and breaks every MTK helper that needs it. */
+void mtk_common_set_kbdev(struct kbase_device *kbdev)
+{
+	mali_kbdev = kbdev;
+}
+EXPORT_SYMBOL(mtk_common_set_kbdev);
 
 bool mtk_common_pm_is_mfg_active(void)
 {
@@ -384,6 +395,19 @@ int mtk_common_gpufreq_bringup(void)
 
 	return bringup;
 }
+
+u32 mtk_common_get_current_rate_hz(void)
+{
+	/* Pure read: this is called from calc_prfcnt_delta() with the IPA
+	 * control spinlock held, so it must not start work or take other locks.
+	 * The governor is started from mtk_dvfs_init() instead.
+	 *
+	 * Report the GPU domain: the counters are scaled by the GPU core clock.
+	 * Under dual-buck, TARGET_DEFAULT resolves to STACK (219..845 MHz).
+	 */
+	return (u32)gpufreq_get_cur_freq(TARGET_GPU) * 1000;
+}
+EXPORT_SYMBOL(mtk_common_get_current_rate_hz);
 
 int mtk_common_gpufreq_commit(int opp_idx)
 {

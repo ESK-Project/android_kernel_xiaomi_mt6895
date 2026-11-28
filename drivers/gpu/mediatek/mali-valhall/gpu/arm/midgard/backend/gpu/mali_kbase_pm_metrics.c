@@ -469,11 +469,6 @@ KBASE_EXPORT_TEST_API(kbase_pm_get_dvfs_metrics);
 #ifdef CONFIG_MALI_MIDGARD_DVFS
 void kbase_pm_get_dvfs_action(struct kbase_device *kbdev)
 {
-#if !IS_ENABLED(CONFIG_MALI_MTK_COMMON)
-/*
- * kbase_platform_dvfs_event is not implemented by MTK.
- * We used MTKCalGpuUtilization/MTKCalGpuUtilization_ex instead.
- */
 	int utilisation;
 	struct kbasep_pm_metrics *diff;
 
@@ -497,22 +492,57 @@ void kbase_pm_get_dvfs_action(struct kbase_device *kbdev)
 	 * protected mode is already added to busy-time at this point, though,
 	 * so we should be good.
 	 */
-#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
-		IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
-#else
+	/* MTK normally delegates DVFS to GED, which cannot run here (no
+	 * frame/KPI feed). Hand the utilisation to the platform hook so
+	 * kbase's own DVFS timer drives frequency selection.
+	 */
 	kbase_platform_dvfs_event(kbdev, utilisation);
-#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY */
-#endif /* CONFIG_MALI_MTK_COMMON */
 }
 
 #if IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
+/* MTK: the DVFS policy normally relies on GED sampling, but GED's
+ * utilisation callback reads kbase PM metrics (dvfs_diff), so the
+ * hrtimer must actually run for utilisation to be non-zero.
+ */
 bool kbase_pm_metrics_is_active(struct kbase_device *kbdev)
 {
-	return false;
+	return atomic_read(&kbdev->pm.backend.metrics.timer_state) == TIMER_ON;
 }
 KBASE_EXPORT_TEST_API(kbase_pm_metrics_is_active);
-void kbase_pm_metrics_start(struct kbase_device *kbdev) {}
-void kbase_pm_metrics_stop(struct kbase_device *kbdev) {}
+
+void kbase_pm_metrics_start(struct kbase_device *kbdev)
+{
+	struct kbasep_pm_metrics_state *metrics;
+
+	if (kbdev == NULL)
+		return;
+
+	metrics = &kbdev->pm.backend.metrics;
+
+	if (unlikely(!metrics->initialized))
+		return;
+
+	if (atomic_xchg(&metrics->timer_state, TIMER_ON) == TIMER_OFF)
+		hrtimer_start(&metrics->timer,
+			      HR_TIMER_DELAY_MSEC(kbdev->pm.dvfs_period),
+			      HRTIMER_MODE_REL);
+}
+
+void kbase_pm_metrics_stop(struct kbase_device *kbdev)
+{
+	struct kbasep_pm_metrics_state *metrics;
+
+	if (kbdev == NULL)
+		return;
+
+	metrics = &kbdev->pm.backend.metrics;
+
+	if (unlikely(!metrics->initialized))
+		return;
+
+	if (atomic_xchg(&metrics->timer_state, TIMER_OFF) == TIMER_ON)
+		hrtimer_cancel(&metrics->timer);
+}
 #else /* CONFIG_MALI_MTK_DVFS_POLICY */
 
 bool kbase_pm_metrics_is_active(struct kbase_device *kbdev)

@@ -210,6 +210,25 @@ struct kbase_pm_core_masks kbase_pm_ca_get_core_masks(struct kbase_device *kbdev
 }
 KBASE_EXPORT_TEST_API(kbase_pm_ca_get_core_masks);
 
+#ifndef CONFIG_MALI_DEVFREQ
+/* devfreq is not built on this platform (no DT clock), but MTK's DVFS
+ * policy still requests core-mask changes through this symbol. */
+void kbase_devfreq_set_core_mask(struct kbase_device *kbdev, u64 core_mask)
+{
+	unsigned long flags;
+
+	if (core_mask == 0 ||
+	    (core_mask & kbdev->gpu_props.shader_present) != core_mask)
+		return;
+
+	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
+	kbase_pm_ca_set_core_mask(kbdev, PM_CA_COREMASK_TYPE_SYSFS,
+				  core_mask);
+	kbase_pm_update_state(kbdev);
+	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+}
+#endif /* !CONFIG_MALI_DEVFREQ */
+
 #ifdef CONFIG_MALI_DEVFREQ
 void kbase_devfreq_set_core_mask(struct kbase_device *kbdev, u64 core_mask)
 {
@@ -253,7 +272,7 @@ void kbase_devfreq_set_core_mask(struct kbase_device *kbdev, u64 core_mask)
 	}
 
 	/* Update the core masks based on DEVFREQ policy */
-	kbase_pm_ca_set_core_mask(kbdev, PM_CA_COREMASK_TYPE_DEVFREQ, core_mask);
+	kbase_pm_ca_set_core_mask(kbdev, PM_CA_COREMASK_TYPE_SYSFS, core_mask);
 	kbase_pm_update_state(kbdev);
 
 	/* Get new core mask for GLB_ALLOC_EN */
