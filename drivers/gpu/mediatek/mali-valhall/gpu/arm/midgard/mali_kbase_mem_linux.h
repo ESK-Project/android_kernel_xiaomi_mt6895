@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2010, 2012-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2010-2025 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -20,7 +20,7 @@
  */
 
 /**
- * Base kernel memory APIs, Linux implementation.
+ * DOC: Base kernel memory APIs, Linux implementation.
  */
 
 #ifndef _KBASE_MEM_LINUX_H_
@@ -28,9 +28,9 @@
 
 /* A HWC dump mapping */
 struct kbase_hwc_dma_mapping {
-	void       *cpu_va;
-	dma_addr_t  dma_pa;
-	size_t      size;
+	void *cpu_va;
+	dma_addr_t dma_pa;
+	size_t size;
 };
 
 /**
@@ -44,13 +44,21 @@ struct kbase_hwc_dma_mapping {
  * @flags:        bitmask of BASE_MEM_* flags to convey special requirements &
  *                properties for the new allocation.
  * @gpu_va:       Start address of the memory region which was allocated from GPU
- *                virtual address space.
+ *                virtual address space. If the BASEP_MEM_FLAG_MAP_FIXED is set
+ *                then this parameter shall be provided by the caller.
+ * @mmu_sync_info: Indicates whether this call is synchronous wrt MMU ops.
  *
  * Return: 0 on success or error code
  */
-struct kbase_va_region *kbase_mem_alloc(struct kbase_context *kctx,
-					u64 va_pages, u64 commit_pages,
-					u64 extension, u64 *flags, u64 *gpu_va);
+#if IS_ENABLED(CONFIG_MALI_MTK_MEMORY_DEBUG)
+struct kbase_va_region *kbase_mem_alloc(struct kbase_context *kctx, u64 va_pages, u64 commit_pages,
+					u64 extension, base_mem_alloc_flags *flags, u64 *gpu_va,
+					enum kbase_caller_mmu_sync_info mmu_sync_info, enum kbase_memory_category category);
+#else
+struct kbase_va_region *kbase_mem_alloc(struct kbase_context *kctx, u64 va_pages, u64 commit_pages,
+					u64 extension, base_mem_alloc_flags *flags, u64 *gpu_va,
+					enum kbase_caller_mmu_sync_info mmu_sync_info);
+#endif /* CONFIG_MALI_MTK_MEMORY_DEBUG */
 
 /**
  * kbase_mem_query - Query properties of a GPU memory region
@@ -65,8 +73,7 @@ struct kbase_va_region *kbase_mem_alloc(struct kbase_context *kctx,
  *
  * Return: 0 on success or error code
  */
-int kbase_mem_query(struct kbase_context *kctx, u64 gpu_addr, u64 query,
-		u64 *const out);
+int kbase_mem_query(struct kbase_context *kctx, u64 gpu_addr, u64 query, u64 *const out);
 
 /**
  * kbase_mem_import - Import the external memory for use by the GPU
@@ -82,10 +89,14 @@ int kbase_mem_query(struct kbase_context *kctx, u64 gpu_addr, u64 query,
  *            memory.
  * Return: 0 on success or error code
  */
+#if IS_ENABLED(CONFIG_MALI_MTK_SLC_DYNAMIC_POLICY_V2)
 int kbase_mem_import(struct kbase_context *kctx, enum base_mem_import_type type,
-		void __user *phandle, u32 padding, u64 *gpu_va, u64 *va_pages,
-		u64 *flags);
-
+		     void __user *phandle, u32 padding, u64 *gpu_va, u64 *va_pages, base_mem_alloc_flags *flags, u8 PBHA, bool isFirstDmaBuf);
+#else
+int kbase_mem_import(struct kbase_context *kctx, enum base_mem_import_type type,
+		     void __user *phandle, u32 padding, u64 *gpu_va, u64 *va_pages,
+		     base_mem_alloc_flags *flags);
+#endif
 /**
  * kbase_mem_alias - Create a new allocation for GPU, aliasing one or more
  *                   memory regions
@@ -99,7 +110,8 @@ int kbase_mem_import(struct kbase_context *kctx, enum base_mem_import_type type,
  *
  * Return: 0 on failure or otherwise the GPU VA for the alias
  */
-u64 kbase_mem_alias(struct kbase_context *kctx, u64 *flags, u64 stride, u64 nents, struct base_mem_aliasing_info *ai, u64 *num_pages);
+u64 kbase_mem_alias(struct kbase_context *kctx, base_mem_alloc_flags *flags, u64 stride, u64 nents,
+		    struct base_mem_aliasing_info *ai, u64 *num_pages);
 
 /**
  * kbase_mem_flags_change - Change the flags for a memory region
@@ -111,7 +123,8 @@ u64 kbase_mem_alias(struct kbase_context *kctx, u64 *flags, u64 stride, u64 nent
  *
  * Return: 0 on success or error code
  */
-int kbase_mem_flags_change(struct kbase_context *kctx, u64 gpu_addr, unsigned int flags, unsigned int mask);
+int kbase_mem_flags_change(struct kbase_context *kctx, u64 gpu_addr, base_mem_alloc_flags flags,
+			   base_mem_alloc_flags mask);
 
 /**
  * kbase_mem_commit - Change the physical backing size of a region
@@ -133,8 +146,7 @@ int kbase_mem_commit(struct kbase_context *kctx, u64 gpu_addr, u64 new_pages);
  *
  * Return: 0 on success or error code
  */
-int kbase_mem_shrink(struct kbase_context *kctx,
-		struct kbase_va_region *reg, u64 new_pages);
+int kbase_mem_shrink(struct kbase_context *kctx, struct kbase_va_region *reg, u64 new_pages);
 
 /**
  * kbase_context_mmap - Memory map method, gets invoked when mmap system call is
@@ -148,9 +160,10 @@ int kbase_mem_shrink(struct kbase_context *kctx,
 int kbase_context_mmap(struct kbase_context *kctx, struct vm_area_struct *vma);
 
 /**
- * kbase_mem_evictable_init - Initialize the Ephemeral memory eviction
- * mechanism.
+ * kbase_mem_evictable_init - Initialize the Ephemeral memory eviction mechanism.
  * @kctx: The kbase context to initialize.
+ *
+ * This function must be called only when a kbase context is instantiated.
  *
  * Return: Zero on success or -errno on failure.
  */
@@ -169,23 +182,22 @@ void kbase_mem_evictable_deinit(struct kbase_context *kctx);
  * @reg:       The GPU region
  * @new_pages: The number of pages after the grow
  * @old_pages: The number of pages before the grow
+ * @mmu_sync_info: Indicates whether this call is synchronous wrt MMU ops.
  *
  * Return: 0 on success, -errno on error.
  *
- * Expand the GPU mapping to encompass the new psychical pages which have
+ * Expand the GPU mapping to encompass the new physical pages which have
  * been added to the allocation.
  *
  * Note: Caller must be holding the region lock.
  */
-int kbase_mem_grow_gpu_mapping(struct kbase_context *kctx,
-		struct kbase_va_region *reg,
-		u64 new_pages, u64 old_pages);
+int kbase_mem_grow_gpu_mapping(struct kbase_context *kctx, struct kbase_va_region *reg,
+			       u64 new_pages, u64 old_pages,
+			       enum kbase_caller_mmu_sync_info mmu_sync_info);
 
 /**
  * kbase_mem_evictable_make - Make a physical allocation eligible for eviction
  * @gpu_alloc: The physical allocation to make evictable
- *
- * Return: 0 on success, -errno on error.
  *
  * Take the provided region and make all the physical pages within it
  * reclaimable by the kernel, updating the per-process VM stats as well.
@@ -195,7 +207,7 @@ int kbase_mem_grow_gpu_mapping(struct kbase_context *kctx,
  *
  * Note: Must be called with the region lock of the containing context.
  */
-int kbase_mem_evictable_make(struct kbase_mem_phy_alloc *gpu_alloc);
+void kbase_mem_evictable_make(struct kbase_mem_phy_alloc *gpu_alloc);
 
 /**
  * kbase_mem_evictable_unmake - Remove a physical allocations eligibility for
@@ -213,6 +225,26 @@ int kbase_mem_evictable_make(struct kbase_mem_phy_alloc *gpu_alloc);
  */
 bool kbase_mem_evictable_unmake(struct kbase_mem_phy_alloc *alloc);
 
+typedef unsigned int kbase_vmap_flag;
+
+/* Sync operations are needed on beginning and ending of access to kernel-mapped GPU memory.
+ *
+ * This is internal to the struct kbase_vmap_struct and should not be passed in by callers of
+ * kbase_vmap-related functions.
+ */
+#define KBASE_VMAP_FLAG_SYNC_NEEDED (((kbase_vmap_flag)1) << 0)
+
+/* Permanently mapped memory accounting (including enforcing limits) should be done on the
+ * kernel-mapped GPU memory.
+ *
+ * This should be used if the kernel mapping is going to live for a potentially long time, for
+ * example if it will persist after the caller has returned.
+ */
+#define KBASE_VMAP_FLAG_PERMANENT_MAP_ACCOUNTING (((kbase_vmap_flag)1) << 1)
+
+/* Set of flags that can be passed into kbase_vmap-related functions */
+#define KBASE_VMAP_INPUT_FLAGS (KBASE_VMAP_FLAG_PERMANENT_MAP_ACCOUNTING)
+
 struct kbase_vmap_struct {
 	off_t offset_in_page;
 	struct kbase_mem_phy_alloc *cpu_alloc;
@@ -221,9 +253,55 @@ struct kbase_vmap_struct {
 	struct tagged_addr *gpu_pages;
 	void *addr;
 	size_t size;
-	bool sync_needed;
+	kbase_vmap_flag flags;
 };
 
+/**
+ * kbase_mem_shrink_gpu_mapping - Shrink the GPU mapping of an allocation
+ * @kctx:      Context the region belongs to
+ * @reg:       The GPU region or NULL if there isn't one
+ * @new_pages: The number of pages after the shrink
+ * @old_pages: The number of pages before the shrink
+ *
+ * Return: 0 on success, negative -errno on error
+ *
+ * Unmap the shrunk pages from the GPU mapping. Note that the size of the region
+ * itself is unmodified as we still need to reserve the VA, only the page tables
+ * will be modified by this function.
+ */
+int kbase_mem_shrink_gpu_mapping(struct kbase_context *kctx, struct kbase_va_region *reg,
+				 u64 new_pages, u64 old_pages);
+
+/**
+ * kbase_vmap_reg - Map part of an existing region into the kernel safely, only if the requested
+ *                  access permissions are supported
+ * @kctx:         Context @reg belongs to
+ * @reg:          The GPU region to map part of
+ * @gpu_addr:     Start address of VA range to map, which must be within @reg
+ * @size:         Size of VA range, which when added to @gpu_addr must be within @reg
+ * @prot_request: Flags indicating how the caller will then access the memory
+ * @map:          Structure to be given to kbase_vunmap() on freeing
+ * @vmap_flags:   Flags of type kbase_vmap_flag
+ *
+ * Return: Kernel-accessible CPU pointer to the VA range, or NULL on error
+ *
+ * Variant of kbase_vmap_prot() that can be used given an existing region.
+ *
+ * The caller must satisfy one of the following for @reg:
+ * * It must have been obtained by finding it on the region tracker, and the region lock must not
+ *   have been released in the mean time.
+ * * Or, it must have been refcounted with a call to kbase_va_region_alloc_get(), and the region
+ *   lock is now held again.
+ * * Or, @reg has had NO_USER_FREE set at creation time or under the region lock, and the
+ *   region lock is now held again.
+ *
+ * The acceptable @vmap_flags are those in %KBASE_VMAP_INPUT_FLAGS.
+ *
+ * Refer to kbase_vmap_prot() for more information on the operation of this function.
+ */
+void *kbase_vmap_reg(struct kbase_context *kctx, struct kbase_va_region *reg, u64 gpu_addr,
+		     size_t size, unsigned long prot_request, struct kbase_vmap_struct *map,
+		     kbase_vmap_flag vmap_flags);
 
 /**
  * kbase_vmap_prot - Map a GPU VA range into the kernel safely, only if the
@@ -254,7 +332,7 @@ struct kbase_vmap_struct {
  * The checks are also there to help catch access errors on memory where
  * security is not a concern: imported memory that is always RW, and memory
  * that was allocated and owned by the process attached to @kctx. In this case,
- * it helps to identify memory that was was mapped with the wrong access type.
+ * it helps to identify memory that was mapped with the wrong access type.
  *
  * Note: KBASE_REG_GPU_{RD,WR} flags are currently supported for legacy cases
  * where either the security of memory is solely dependent on those flags, or
@@ -292,7 +370,7 @@ void *kbase_vmap_prot(struct kbase_context *kctx, u64 gpu_addr, size_t size,
  * has been imported.
  */
 void *kbase_vmap(struct kbase_context *kctx, u64 gpu_addr, size_t size,
-		struct kbase_vmap_struct *map);
+		 struct kbase_vmap_struct *map);
 
 /**
  * kbase_vunmap - Unmap a GPU VA range from the kernel
@@ -324,8 +402,8 @@ extern const struct vm_operations_struct kbase_vm_ops;
  * Note: The caller shall ensure that CPU mapping is not revoked & remains
  * active whilst the maintenance is in progress.
  */
-void kbase_sync_mem_regions(struct kbase_context *kctx,
-		struct kbase_vmap_struct *map, enum kbase_sync_type dest);
+void kbase_sync_mem_regions(struct kbase_context *kctx, struct kbase_vmap_struct *map,
+			    enum kbase_sync_type dest);
 
 /**
  * kbase_mem_shrink_cpu_mapping - Shrink the CPU mapping(s) of an allocation
@@ -337,9 +415,8 @@ void kbase_sync_mem_regions(struct kbase_context *kctx,
  * Shrink (or completely remove) all CPU mappings which reference the shrunk
  * part of the allocation.
  */
-void kbase_mem_shrink_cpu_mapping(struct kbase_context *kctx,
-		struct kbase_va_region *reg,
-		u64 new_pages, u64 old_pages);
+void kbase_mem_shrink_cpu_mapping(struct kbase_context *kctx, struct kbase_va_region *reg,
+				  u64 new_pages, u64 old_pages);
 
 /**
  * kbase_phy_alloc_mapping_term - Terminate the kernel side mapping of a
@@ -350,8 +427,7 @@ void kbase_mem_shrink_cpu_mapping(struct kbase_context *kctx,
  * This function will unmap the kernel mapping, and free any structures used to
  * track it.
  */
-void kbase_phy_alloc_mapping_term(struct kbase_context *kctx,
-		struct kbase_mem_phy_alloc *alloc);
+void kbase_phy_alloc_mapping_term(struct kbase_context *kctx, struct kbase_mem_phy_alloc *alloc);
 
 /**
  * kbase_phy_alloc_mapping_get - Get a kernel-side CPU pointer to the permanent
@@ -395,7 +471,7 @@ void kbase_phy_alloc_mapping_term(struct kbase_context *kctx,
  * - the region containing @gpu_addr does not support a permanent kernel mapping
  */
 void *kbase_phy_alloc_mapping_get(struct kbase_context *kctx, u64 gpu_addr,
-		struct kbase_vmap_struct **out_kern_mapping);
+				  struct kbase_vmap_struct **out_kern_mapping);
 
 /**
  * kbase_phy_alloc_mapping_put - Put a reference to the kernel-side mapping of a
@@ -417,45 +493,19 @@ void *kbase_phy_alloc_mapping_get(struct kbase_context *kctx, u64 gpu_addr,
  * the physical allocation is still present.
  */
 void kbase_phy_alloc_mapping_put(struct kbase_context *kctx,
-		struct kbase_vmap_struct *kern_mapping);
+				 struct kbase_vmap_struct *kern_mapping);
 
 /**
  * kbase_get_cache_line_alignment - Return cache line alignment
+ *
+ * @kbdev: Device pointer.
  *
  * Helper function to return the maximum cache line alignment considering
  * both CPU and GPU cache sizes.
  *
  * Return: CPU and GPU cache line alignment, in bytes.
- *
- * @kbdev: Device pointer.
  */
 u32 kbase_get_cache_line_alignment(struct kbase_device *kbdev);
-
-#if (KERNEL_VERSION(4, 20, 0) > LINUX_VERSION_CODE)
-static inline vm_fault_t vmf_insert_pfn_prot(struct vm_area_struct *vma,
-			unsigned long addr, unsigned long pfn, pgprot_t pgprot)
-{
-	int err;
-
-#if ((KERNEL_VERSION(4, 4, 147) >= LINUX_VERSION_CODE) || \
-		((KERNEL_VERSION(4, 6, 0) > LINUX_VERSION_CODE) && \
-		 (KERNEL_VERSION(4, 5, 0) <= LINUX_VERSION_CODE)))
-	if (pgprot_val(pgprot) != pgprot_val(vma->vm_page_prot))
-		return VM_FAULT_SIGBUS;
-
-	err = vm_insert_pfn(vma, addr, pfn);
-#else
-	err = vm_insert_pfn_prot(vma, addr, pfn, pgprot);
-#endif
-
-	if (unlikely(err == -ENOMEM))
-		return VM_FAULT_OOM;
-	if (unlikely(err < 0 && err != -EBUSY))
-		return VM_FAULT_SIGBUS;
-
-	return VM_FAULT_NOPAGE;
-}
-#endif
 
 /**
  * kbase_mem_get_process_mmap_lock - Return the mmap lock for the current process
@@ -471,4 +521,4 @@ static inline struct rw_semaphore *kbase_mem_get_process_mmap_lock(void)
 #endif /* KERNEL_VERSION(5, 8, 0) > LINUX_VERSION_CODE */
 }
 
-#endif				/* _KBASE_MEM_LINUX_H_ */
+#endif /* _KBASE_MEM_LINUX_H_ */

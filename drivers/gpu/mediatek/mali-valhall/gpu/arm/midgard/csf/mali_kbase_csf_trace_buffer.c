@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2018-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2018-2024 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -28,21 +28,22 @@
 
 #include <linux/list.h>
 #include <linux/mman.h>
+#include <linux/version_compat_defs.h>
 
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
-#if (KERNEL_VERSION(4, 7, 0) > LINUX_VERSION_CODE)
-#define DEFINE_DEBUGFS_ATTRIBUTE DEFINE_SIMPLE_ATTRIBUTE
-#endif
-#endif
+#if IS_ENABLED(CONFIG_MALI_MTK_KE_DUMP_FWLOG)
+#define FWLOG_EOF_LEN 64
+/* for fwlog get latest 1MB data */
+static u8 g_buf[PAGE_SIZE * 256];
+extern u8 *g_fw_dump_dest;
+static char fw_eof_content[FWLOG_EOF_LEN] = "====[Cut]:fwlog End Of File====";
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+#include <platform/mtk_platform_common/mtk_platform_logbuffer.h>
+extern char fw_content[];
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
+#endif /* CONFIG_MALI_MTK_KE_DUMP_FWLOG */
 
 /**
  * struct firmware_trace_buffer - Trace Buffer within the MCU firmware
- *
- * The firmware relays information to the host by writing on memory buffers
- * which are allocated and partially configured by the host. These buffers
- * are called Trace Buffers: each of them has a specific purpose and is
- * identified by a name and a set of memory addresses where the host can
- * set pointers to host-allocated structures.
  *
  * @kbdev:        Pointer to the Kbase device.
  * @node:         List head linking all trace buffers to
@@ -73,6 +74,12 @@
  * @num_pages: Size of the data buffer, in pages.
  * @trace_enable_init_mask: Initial value for the trace enable bit mask.
  * @name:  NULL terminated string which contains the name of the trace buffer.
+ *
+ * The firmware relays information to the host by writing on memory buffers
+ * which are allocated and partially configured by the host. These buffers
+ * are called Trace Buffers: each of them has a specific purpose and is
+ * identified by a name and a set of memory addresses where the host can
+ * set pointers to host-allocated structures.
  */
 struct firmware_trace_buffer {
 	struct kbase_device *kbdev;
@@ -94,20 +101,20 @@ struct firmware_trace_buffer {
 	} cpu_va;
 	u32 num_pages;
 	u32 trace_enable_init_mask[CSF_FIRMWARE_TRACE_ENABLE_INIT_MASK_MAX];
-	char name[1]; /* this field must be last */
+	char name[]; /* this field must be last */
 };
 
 /**
  * struct firmware_trace_buffer_data - Configuration data for trace buffers
  *
- * Describe how to set up a trace buffer interface.
- * Trace buffers are identified by name and they require a data buffer and
- * an initial mask of values for the trace enable bits.
- *
  * @name: Name identifier of the trace buffer
  * @trace_enable_init_mask: Initial value to assign to the trace enable bits
  * @size: Size of the data buffer to allocate for the trace buffer, in pages.
  *        The size of a data buffer must always be a power of 2.
+ *
+ * Describe how to set up a trace buffer interface.
+ * Trace buffers are identified by name and they require a data buffer and
+ * an initial mask of values for the trace enable bits.
  */
 struct firmware_trace_buffer_data {
 	char name[64];
@@ -121,15 +128,75 @@ struct firmware_trace_buffer_data {
  * This table contains the configuration data for the trace buffers that are
  * expected to be parsed from the firmware.
  */
-static const struct firmware_trace_buffer_data
-trace_buffer_data[] = {
-#ifndef MALI_KBASE_BUILD
-	{ "fwutf", {0}, 1 },
+static const struct firmware_trace_buffer_data trace_buffer_data[] = {
+#if MALI_UNIT_TEST
+	{ KBASE_CSFFW_UTF_BUF_NAME, { 0 }, 1 },
 #endif
-	{ FW_TRACE_BUF_NAME, {0}, 4 },
-	{ "benchmark", {0}, 2 },
-	{ "timeline",  {0}, KBASE_CSF_TL_BUFFER_NR_PAGES },
+#if IS_ENABLED(CONFIG_MALI_MTK_KE_DUMP_FWLOG)
+	{ KBASE_CSFFW_LOG_BUF_NAME, { 0 }, 256 },
+#else
+	{ KBASE_CSFFW_LOG_BUF_NAME, { 0 }, 4 },
+#endif /* CONFIG_MALI_MTK_KE_DUMP_FWLOG */
+	{ KBASE_CSFFW_BENCHMARK_BUF_NAME, { 0 }, 2 },
+	{ KBASE_CSFFW_TIMELINE_BUF_NAME, { 0 }, KBASE_CSF_TL_BUFFER_NR_PAGES },
+#if IS_ENABLED(CONFIG_MALI_TRACE_POWER_GPU_WORK_PERIOD)
+	{ KBASE_CSFFW_GPU_METRICS_BUF_NAME, { 0 }, 16 },
+#endif /* CONFIG_MALI_TRACE_POWER_GPU_WORK_PERIOD */
 };
+
+/* CSF firmware trace log buffer size */
+static unsigned int csf_firmware_log_buf_size;
+
+/**
+ * set_csf_fw_log_buf_size() - sets csf_firmware_log_buf_size
+ * @val: Buffer pointer to read the value from
+ * @kp: pointer to the kernel_param
+ *
+ * Module param callback function to set csf_firmware_log_buf_size
+ *
+ * Return: 0 if success or the error code.
+ */
+static int set_csf_fw_log_buf_size(const char *val, const struct kernel_param *kp)
+{
+	int size_in_bytes;
+	/* Maximum size is 32MB */
+	const unsigned int max_size = 32 * 1024 * 1024;
+
+	if (kstrtoint(val, 10, &size_in_bytes))
+		return -EINVAL;
+
+	if (!size_in_bytes || size_in_bytes % PAGE_SIZE || size_in_bytes > max_size)
+		return -EINVAL;
+
+	csf_firmware_log_buf_size = size_in_bytes / PAGE_SIZE;
+
+	return 0;
+}
+
+/**
+ * get_csf_fw_log_buf_size() - returns csf_firmware_log_buf_size
+ * @buffer: Buffer pointer to which value is written
+ * @kp: pointer to the kernel_param
+ *
+ * Module param callback function to return the value of csf_firmware_log_buf_size
+ *
+ * Return: length written to the buffer if success or the error code.
+ */
+static int get_csf_fw_log_buf_size(char *buffer, const struct kernel_param *kp)
+{
+	return scnprintf(buffer, PAGE_SIZE, "%lu\n", (csf_firmware_log_buf_size * PAGE_SIZE));
+}
+
+static const struct kernel_param_ops csf_fw_log_buf_size_ops = {
+	.set = set_csf_fw_log_buf_size,
+	.get = get_csf_fw_log_buf_size,
+};
+
+module_param_cb(csf_firmware_log_buf_size, &csf_fw_log_buf_size_ops, NULL, 0444);
+__MODULE_PARM_TYPE(csf_firmware_log_buf_size, "uint");
+MODULE_PARM_DESC(
+	csf_firmware_log_buf_size,
+	"Buffer size in bytes. It should be page size aligned and less than or equal to 32MB.");
 
 int kbase_csf_firmware_trace_buffers_init(struct kbase_device *kbdev)
 {
@@ -139,15 +206,14 @@ int kbase_csf_firmware_trace_buffers_init(struct kbase_device *kbdev)
 	const u32 cache_line_alignment = kbase_get_cache_line_alignment(kbdev);
 
 	if (list_empty(&kbdev->csf.firmware_trace_buffers.list)) {
-		dev_vdbg(kbdev->dev, "No trace buffers to initialise\n");
+		dev_dbg(kbdev->dev, "No trace buffers to initialise\n");
 		return 0;
 	}
 
 	/* GPU-readable,writable memory used for Extract variables */
-	ret = kbase_csf_firmware_mcu_shared_mapping_init(
-			kbdev, 1, PROT_WRITE,
-			KBASE_REG_GPU_RD | KBASE_REG_GPU_WR,
-			&kbdev->csf.firmware_trace_buffers.mcu_rw);
+	ret = kbase_csf_firmware_mcu_shared_mapping_init(kbdev, 1, PROT_WRITE,
+							 KBASE_REG_GPU_RD | KBASE_REG_GPU_WR,
+							 &kbdev->csf.firmware_trace_buffers.mcu_rw);
 	if (ret != 0) {
 		dev_err(kbdev->dev, "Failed to map GPU-rw MCU shared memory\n");
 		goto out;
@@ -155,42 +221,39 @@ int kbase_csf_firmware_trace_buffers_init(struct kbase_device *kbdev)
 
 	/* GPU-writable memory used for Insert variables */
 	ret = kbase_csf_firmware_mcu_shared_mapping_init(
-			kbdev, 1, PROT_READ, KBASE_REG_GPU_WR,
-			&kbdev->csf.firmware_trace_buffers.mcu_write);
+		kbdev, 1, PROT_READ, KBASE_REG_GPU_WR,
+		&kbdev->csf.firmware_trace_buffers.mcu_write);
 	if (ret != 0) {
 		dev_err(kbdev->dev, "Failed to map GPU-writable MCU shared memory\n");
 		goto out;
 	}
 
 	list_for_each_entry(trace_buffer, &kbdev->csf.firmware_trace_buffers.list, node) {
-		u32 extract_gpu_va, insert_gpu_va, data_buffer_gpu_va,
-			trace_enable_size_dwords;
+		u32 extract_gpu_va, insert_gpu_va, data_buffer_gpu_va, trace_enable_size_dwords;
 		u32 *extract_cpu_va, *insert_cpu_va;
 		unsigned int i;
 
 		/* GPU-writable data buffer for the individual trace buffer */
-		ret = kbase_csf_firmware_mcu_shared_mapping_init(
-				kbdev, trace_buffer->num_pages, PROT_READ, KBASE_REG_GPU_WR,
-				&trace_buffer->data_mapping);
+		ret = kbase_csf_firmware_mcu_shared_mapping_init(kbdev, trace_buffer->num_pages,
+								 PROT_READ, KBASE_REG_GPU_WR,
+								 &trace_buffer->data_mapping);
 		if (ret) {
-			dev_err(kbdev->dev, "Failed to map GPU-writable MCU shared memory for a trace buffer\n");
+			dev_err(kbdev->dev,
+				"Failed to map GPU-writable MCU shared memory for a trace buffer\n");
 			goto out;
 		}
 
 		extract_gpu_va =
 			(kbdev->csf.firmware_trace_buffers.mcu_rw.va_reg->start_pfn << PAGE_SHIFT) +
 			mcu_rw_offset;
-		extract_cpu_va = (u32*)(
-			kbdev->csf.firmware_trace_buffers.mcu_rw.cpu_addr +
-			mcu_rw_offset);
-		insert_gpu_va =
-			(kbdev->csf.firmware_trace_buffers.mcu_write.va_reg->start_pfn << PAGE_SHIFT) +
-			mcu_write_offset;
-		insert_cpu_va = (u32*)(
-			kbdev->csf.firmware_trace_buffers.mcu_write.cpu_addr +
-			mcu_write_offset);
-		data_buffer_gpu_va =
-			(trace_buffer->data_mapping.va_reg->start_pfn << PAGE_SHIFT);
+		extract_cpu_va =
+			(u32 *)(kbdev->csf.firmware_trace_buffers.mcu_rw.cpu_addr + mcu_rw_offset);
+		insert_gpu_va = (kbdev->csf.firmware_trace_buffers.mcu_write.va_reg->start_pfn
+				 << PAGE_SHIFT) +
+				mcu_write_offset;
+		insert_cpu_va = (u32 *)(kbdev->csf.firmware_trace_buffers.mcu_write.cpu_addr +
+					mcu_write_offset);
+		data_buffer_gpu_va = (trace_buffer->data_mapping.va_reg->start_pfn << PAGE_SHIFT);
 
 		/* Initialize the Extract variable */
 		*extract_cpu_va = 0;
@@ -198,23 +261,21 @@ int kbase_csf_firmware_trace_buffers_init(struct kbase_device *kbdev)
 		/* Each FW address shall be mapped and set individually, as we can't
 		 * assume anything about their location in the memory address space.
 		 */
-		kbase_csf_update_firmware_memory(
-				kbdev, trace_buffer->gpu_va.data_address, data_buffer_gpu_va);
-		kbase_csf_update_firmware_memory(
-				kbdev, trace_buffer->gpu_va.insert_address, insert_gpu_va);
-		kbase_csf_update_firmware_memory(
-				kbdev, trace_buffer->gpu_va.extract_address, extract_gpu_va);
-		kbase_csf_update_firmware_memory(
-				kbdev, trace_buffer->gpu_va.size_address,
-				trace_buffer->num_pages << PAGE_SHIFT);
+		kbase_csf_update_firmware_memory(kbdev, trace_buffer->gpu_va.data_address,
+						 data_buffer_gpu_va);
+		kbase_csf_update_firmware_memory(kbdev, trace_buffer->gpu_va.insert_address,
+						 insert_gpu_va);
+		kbase_csf_update_firmware_memory(kbdev, trace_buffer->gpu_va.extract_address,
+						 extract_gpu_va);
+		kbase_csf_update_firmware_memory(kbdev, trace_buffer->gpu_va.size_address,
+						 trace_buffer->num_pages << PAGE_SHIFT);
 
-		trace_enable_size_dwords =
-				(trace_buffer->trace_enable_entry_count + 31) >> 5;
+		trace_enable_size_dwords = (trace_buffer->trace_enable_entry_count + 31) >> 5;
 
 		for (i = 0; i < trace_enable_size_dwords; i++) {
-			kbase_csf_update_firmware_memory(
-					kbdev, trace_buffer->gpu_va.trace_enable + i*4,
-					trace_buffer->trace_enable_init_mask[i]);
+			kbase_csf_update_firmware_memory(kbdev,
+							 trace_buffer->gpu_va.trace_enable + i * 4,
+							 trace_buffer->trace_enable_init_mask[i]);
 		}
 
 		/* Store CPU virtual addresses for permanently mapped variables */
@@ -239,23 +300,21 @@ void kbase_csf_firmware_trace_buffers_term(struct kbase_device *kbdev)
 		struct firmware_trace_buffer *trace_buffer;
 
 		trace_buffer = list_first_entry(&kbdev->csf.firmware_trace_buffers.list,
-				struct firmware_trace_buffer, node);
+						struct firmware_trace_buffer, node);
 		kbase_csf_firmware_mcu_shared_mapping_term(kbdev, &trace_buffer->data_mapping);
 		list_del(&trace_buffer->node);
 
 		kfree(trace_buffer);
 	}
 
-	kbase_csf_firmware_mcu_shared_mapping_term(
-			kbdev, &kbdev->csf.firmware_trace_buffers.mcu_rw);
-	kbase_csf_firmware_mcu_shared_mapping_term(
-			kbdev, &kbdev->csf.firmware_trace_buffers.mcu_write);
+	kbase_csf_firmware_mcu_shared_mapping_term(kbdev,
+						   &kbdev->csf.firmware_trace_buffers.mcu_rw);
+	kbase_csf_firmware_mcu_shared_mapping_term(kbdev,
+						   &kbdev->csf.firmware_trace_buffers.mcu_write);
 }
 
-int kbase_csf_firmware_parse_trace_buffer_entry(struct kbase_device *kbdev,
-						const u32 *entry,
-						unsigned int size,
-						bool updatable)
+int kbase_csf_firmware_parse_trace_buffer_entry(struct kbase_device *kbdev, const u32 *entry,
+						unsigned int size, bool updatable)
 {
 	const char *name = (char *)&entry[7];
 	const unsigned int name_len = size - TRACE_BUFFER_ENTRY_NAME_OFFSET;
@@ -265,8 +324,7 @@ int kbase_csf_firmware_parse_trace_buffer_entry(struct kbase_device *kbdev,
 	/* Allocate enough space for struct firmware_trace_buffer and the
 	 * trace buffer name (with NULL termination).
 	 */
-	trace_buffer =
-		kmalloc(sizeof(*trace_buffer) + name_len + 1, GFP_KERNEL);
+	trace_buffer = kmalloc(struct_size(trace_buffer, name, name_len + 1), GFP_KERNEL);
 
 	if (!trace_buffer)
 		return -ENOMEM;
@@ -297,11 +355,20 @@ int kbase_csf_firmware_parse_trace_buffer_entry(struct kbase_device *kbdev,
 		}
 	}
 
+	/* CSF firmware log buffer size is configured with 4 pages by default. If the size
+	 * is passed as part of module parameters, configure the size with the respective value.
+	 */
+	if (!strcmp(KBASE_CSFFW_LOG_BUF_NAME, trace_buffer->name) && csf_firmware_log_buf_size) {
+		trace_buffer->num_pages = csf_firmware_log_buf_size;
+		dev_dbg(kbdev->dev, "'%s' Trace buffer size is %u pages", trace_buffer->name,
+			trace_buffer->num_pages);
+	}
+
 	if (i < ARRAY_SIZE(trace_buffer_data)) {
 		list_add(&trace_buffer->node, &kbdev->csf.firmware_trace_buffers.list);
-		dev_vdbg(kbdev->dev, "Trace buffer '%s'", trace_buffer->name);
+		dev_dbg(kbdev->dev, "Trace buffer '%s'", trace_buffer->name);
 	} else {
-		dev_vdbg(kbdev->dev, "Unknown trace buffer '%s'", trace_buffer->name);
+		dev_dbg(kbdev->dev, "Unknown trace buffer '%s'", trace_buffer->name);
 		kfree(trace_buffer);
 	}
 
@@ -315,8 +382,7 @@ void kbase_csf_firmware_reload_trace_buffers_data(struct kbase_device *kbdev)
 	const u32 cache_line_alignment = kbase_get_cache_line_alignment(kbdev);
 
 	list_for_each_entry(trace_buffer, &kbdev->csf.firmware_trace_buffers.list, node) {
-		u32 extract_gpu_va, insert_gpu_va, data_buffer_gpu_va,
-			trace_enable_size_dwords;
+		u32 extract_gpu_va, insert_gpu_va, data_buffer_gpu_va, trace_enable_size_dwords;
 		u32 *extract_cpu_va, *insert_cpu_va;
 		unsigned int i;
 
@@ -324,17 +390,14 @@ void kbase_csf_firmware_reload_trace_buffers_data(struct kbase_device *kbdev)
 		extract_gpu_va =
 			(kbdev->csf.firmware_trace_buffers.mcu_rw.va_reg->start_pfn << PAGE_SHIFT) +
 			mcu_rw_offset;
-		extract_cpu_va = (u32*)(
-			kbdev->csf.firmware_trace_buffers.mcu_rw.cpu_addr +
-			mcu_rw_offset);
-		insert_gpu_va =
-			(kbdev->csf.firmware_trace_buffers.mcu_write.va_reg->start_pfn << PAGE_SHIFT) +
-			mcu_write_offset;
-		insert_cpu_va = (u32*)(
-			kbdev->csf.firmware_trace_buffers.mcu_write.cpu_addr +
-			mcu_write_offset);
-		data_buffer_gpu_va =
-			(trace_buffer->data_mapping.va_reg->start_pfn << PAGE_SHIFT);
+		extract_cpu_va =
+			(u32 *)(kbdev->csf.firmware_trace_buffers.mcu_rw.cpu_addr + mcu_rw_offset);
+		insert_gpu_va = (kbdev->csf.firmware_trace_buffers.mcu_write.va_reg->start_pfn
+				 << PAGE_SHIFT) +
+				mcu_write_offset;
+		insert_cpu_va = (u32 *)(kbdev->csf.firmware_trace_buffers.mcu_write.cpu_addr +
+					mcu_write_offset);
+		data_buffer_gpu_va = (trace_buffer->data_mapping.va_reg->start_pfn << PAGE_SHIFT);
 
 		/* Notice that the function only re-updates firmware memory locations
 		 * with information that allows access to the trace buffers without
@@ -346,23 +409,21 @@ void kbase_csf_firmware_reload_trace_buffers_data(struct kbase_device *kbdev)
 		/* Each FW address shall be mapped and set individually, as we can't
 		 * assume anything about their location in the memory address space.
 		 */
-		kbase_csf_update_firmware_memory(
-				kbdev, trace_buffer->gpu_va.data_address, data_buffer_gpu_va);
-		kbase_csf_update_firmware_memory(
-				kbdev, trace_buffer->gpu_va.insert_address, insert_gpu_va);
-		kbase_csf_update_firmware_memory(
-				kbdev, trace_buffer->gpu_va.extract_address, extract_gpu_va);
-		kbase_csf_update_firmware_memory(
-				kbdev, trace_buffer->gpu_va.size_address,
-				trace_buffer->num_pages << PAGE_SHIFT);
+		kbase_csf_update_firmware_memory(kbdev, trace_buffer->gpu_va.data_address,
+						 data_buffer_gpu_va);
+		kbase_csf_update_firmware_memory(kbdev, trace_buffer->gpu_va.insert_address,
+						 insert_gpu_va);
+		kbase_csf_update_firmware_memory(kbdev, trace_buffer->gpu_va.extract_address,
+						 extract_gpu_va);
+		kbase_csf_update_firmware_memory(kbdev, trace_buffer->gpu_va.size_address,
+						 trace_buffer->num_pages << PAGE_SHIFT);
 
-		trace_enable_size_dwords =
-				(trace_buffer->trace_enable_entry_count + 31) >> 5;
+		trace_enable_size_dwords = (trace_buffer->trace_enable_entry_count + 31) >> 5;
 
 		for (i = 0; i < trace_enable_size_dwords; i++) {
-			kbase_csf_update_firmware_memory(
-					kbdev, trace_buffer->gpu_va.trace_enable + i*4,
-					trace_buffer->trace_enable_init_mask[i]);
+			kbase_csf_update_firmware_memory(kbdev,
+							 trace_buffer->gpu_va.trace_enable + i * 4,
+							 trace_buffer->trace_enable_init_mask[i]);
 		}
 
 		/* Store CPU virtual addresses for permanently mapped variables,
@@ -377,8 +438,8 @@ void kbase_csf_firmware_reload_trace_buffers_data(struct kbase_device *kbdev)
 	}
 }
 
-struct firmware_trace_buffer *kbase_csf_firmware_get_trace_buffer(
-	struct kbase_device *kbdev, const char *name)
+struct firmware_trace_buffer *kbase_csf_firmware_get_trace_buffer(struct kbase_device *kbdev,
+								  const char *name)
 {
 	struct firmware_trace_buffer *trace_buffer;
 
@@ -398,8 +459,9 @@ unsigned int kbase_csf_firmware_trace_buffer_get_trace_enable_bits_count(
 }
 EXPORT_SYMBOL(kbase_csf_firmware_trace_buffer_get_trace_enable_bits_count);
 
-static void kbasep_csf_firmware_trace_buffer_update_trace_enable_bit(
-	struct firmware_trace_buffer *tb, unsigned int bit, bool value)
+static void
+kbasep_csf_firmware_trace_buffer_update_trace_enable_bit(struct firmware_trace_buffer *tb,
+							 unsigned int bit, bool value)
 {
 	struct kbase_device *kbdev = tb->kbdev;
 
@@ -425,14 +487,13 @@ static void kbasep_csf_firmware_trace_buffer_update_trace_enable_bit(
 		 * value of bitmask it cached after the boot.
 		 */
 		kbase_csf_update_firmware_memory(
-			kbdev,
-			tb->gpu_va.trace_enable + trace_enable_reg_offset * 4,
+			kbdev, tb->gpu_va.trace_enable + trace_enable_reg_offset * 4,
 			tb->trace_enable_init_mask[trace_enable_reg_offset]);
 	}
 }
 
-int kbase_csf_firmware_trace_buffer_update_trace_enable_bit(
-	struct firmware_trace_buffer *tb, unsigned int bit, bool value)
+int kbase_csf_firmware_trace_buffer_update_trace_enable_bit(struct firmware_trace_buffer *tb,
+							    unsigned int bit, bool value)
 {
 	struct kbase_device *kbdev = tb->kbdev;
 	int err = 0;
@@ -449,16 +510,14 @@ int kbase_csf_firmware_trace_buffer_update_trace_enable_bit(
 		 * the User to retry the update.
 		 */
 		if (kbase_reset_gpu_silent(kbdev)) {
-			dev_warn(
-				kbdev->dev,
-				"GPU reset already in progress when enabling firmware timeline.");
+			dev_warn(kbdev->dev,
+				 "GPU reset already in progress when enabling firmware timeline.");
 			spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
 			return -EAGAIN;
 		}
 	}
 
-	kbasep_csf_firmware_trace_buffer_update_trace_enable_bit(tb, bit,
-								 value);
+	kbasep_csf_firmware_trace_buffer_update_trace_enable_bit(tb, bit, value);
 	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
 
 	if (tb->updatable)
@@ -468,22 +527,24 @@ int kbase_csf_firmware_trace_buffer_update_trace_enable_bit(
 }
 EXPORT_SYMBOL(kbase_csf_firmware_trace_buffer_update_trace_enable_bit);
 
-bool kbase_csf_firmware_trace_buffer_is_empty(
-	const struct firmware_trace_buffer *trace_buffer)
+bool kbase_csf_firmware_trace_buffer_is_empty(const struct firmware_trace_buffer *trace_buffer)
 {
-	return *(trace_buffer->cpu_va.insert_cpu_va) ==
-			*(trace_buffer->cpu_va.extract_cpu_va);
+	return *(trace_buffer->cpu_va.insert_cpu_va) == *(trace_buffer->cpu_va.extract_cpu_va);
 }
 EXPORT_SYMBOL(kbase_csf_firmware_trace_buffer_is_empty);
 
+#if IS_ENABLED(CONFIG_MALI_MTK_KE_DUMP_FWLOG)
 unsigned int kbase_csf_firmware_trace_buffer_read_data(
 	struct firmware_trace_buffer *trace_buffer, u8 *data, unsigned int num_bytes)
 {
-	unsigned int bytes_copied;
+	static unsigned int bytes_copied = 0, extract_offset_tmp = 0;
 	u8 *data_cpu_va = trace_buffer->data_mapping.cpu_addr;
 	u32 extract_offset = *(trace_buffer->cpu_va.extract_cpu_va);
 	u32 insert_offset = *(trace_buffer->cpu_va.insert_cpu_va);
 	u32 buffer_size = trace_buffer->num_pages << PAGE_SHIFT;
+
+	if ((bytes_copied == 0) && (buffer_size == 0x100000)) /* CONFIG_MALI_MTK_KE_DUMP_FWLOG: need to check fwlog size = 1MB */
+		extract_offset_tmp = extract_offset;
 
 	if (insert_offset >= extract_offset) {
 		bytes_copied = min_t(unsigned int, num_bytes,
@@ -507,16 +568,110 @@ unsigned int kbase_csf_firmware_trace_buffer_read_data(
 			extract_offset = bytes_copied_head;
 	}
 
+	if ((kbase_csf_firmware_trace_buffer_get_active_mask64(trace_buffer) == 0) && (bytes_copied == 0) && (buffer_size == 0x100000))
+		*(trace_buffer->cpu_va.extract_cpu_va) = extract_offset_tmp;
+	else
+		*(trace_buffer->cpu_va.extract_cpu_va) = extract_offset;
+
+	return bytes_copied;
+}
+EXPORT_SYMBOL(kbase_csf_firmware_trace_buffer_read_data);
+#else
+unsigned int kbase_csf_firmware_trace_buffer_read_data(
+	struct firmware_trace_buffer *trace_buffer, u8 *data, unsigned int num_bytes)
+{
+	unsigned int bytes_copied;
+	u8 *data_cpu_va = trace_buffer->data_mapping.cpu_addr;
+	u32 extract_offset = *(trace_buffer->cpu_va.extract_cpu_va);
+	u32 insert_offset = *(trace_buffer->cpu_va.insert_cpu_va);
+	u32 buffer_size = trace_buffer->num_pages << PAGE_SHIFT;
+
+	/* The access to insert offset needs to be ordered with respect to the data
+	 * to be read from the trace buffer to avoid the scenario where the update
+	 * of insert offset becomes visible before the update of data is completely
+	 * visible. Memory barrier is required, both on Host and FW side, to guarantee
+	 * the ordering.
+	 *
+	 * 'osh' is used as CPU and GPU would be in the same Outer shareable domain.
+	 */
+	dmb(osh);
+
+	if (insert_offset >= extract_offset) {
+		bytes_copied = min_t(unsigned int, num_bytes, (insert_offset - extract_offset));
+		memcpy(data, &data_cpu_va[extract_offset], bytes_copied);
+		extract_offset += bytes_copied;
+	} else {
+		unsigned int bytes_copied_head, bytes_copied_tail;
+
+		bytes_copied_tail = min_t(unsigned int, num_bytes, (buffer_size - extract_offset));
+		memcpy(data, &data_cpu_va[extract_offset], bytes_copied_tail);
+
+		bytes_copied_head =
+			min_t(unsigned int, (num_bytes - bytes_copied_tail), insert_offset);
+		memcpy(&data[bytes_copied_tail], data_cpu_va, bytes_copied_head);
+
+		bytes_copied = bytes_copied_head + bytes_copied_tail;
+		extract_offset += bytes_copied;
+		if (extract_offset >= buffer_size)
+			extract_offset = bytes_copied_head;
+	}
+
 	*(trace_buffer->cpu_va.extract_cpu_va) = extract_offset;
 
 	return bytes_copied;
 }
 EXPORT_SYMBOL(kbase_csf_firmware_trace_buffer_read_data);
+#endif /* CONFIG_MALI_MTK_KE_DUMP_FWLOG */
 
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
+void kbase_csf_firmware_trace_buffer_discard(struct firmware_trace_buffer *trace_buffer)
+{
+	unsigned int bytes_discarded;
+	u32 buffer_size = trace_buffer->num_pages << PAGE_SHIFT;
+	u32 extract_offset = *(trace_buffer->cpu_va.extract_cpu_va);
+	u32 insert_offset = *(trace_buffer->cpu_va.insert_cpu_va);
+	unsigned int trace_size;
+
+	if (insert_offset >= extract_offset) {
+		trace_size = insert_offset - extract_offset;
+		if (trace_size > buffer_size / 2) {
+			bytes_discarded = trace_size - buffer_size / 2;
+			extract_offset += bytes_discarded;
+			*(trace_buffer->cpu_va.extract_cpu_va) = extract_offset;
+		}
+	} else {
+		unsigned int bytes_tail;
+
+		bytes_tail = buffer_size - extract_offset;
+		trace_size = bytes_tail + insert_offset;
+		if (trace_size > buffer_size / 2) {
+			bytes_discarded = trace_size - buffer_size / 2;
+			extract_offset += bytes_discarded;
+			if (extract_offset >= buffer_size)
+				extract_offset = extract_offset - buffer_size;
+			*(trace_buffer->cpu_va.extract_cpu_va) = extract_offset;
+		}
+	}
+}
+EXPORT_SYMBOL(kbase_csf_firmware_trace_buffer_discard);
+
+void kbase_csf_firmware_trace_buffer_discard_all(struct firmware_trace_buffer *trace_buffer)
+{
+	if (WARN_ON(!trace_buffer))
+		return;
+
+	*(trace_buffer->cpu_va.extract_cpu_va) = *(trace_buffer->cpu_va.insert_cpu_va);
+}
+
+static void update_trace_buffer_active_mask64(struct firmware_trace_buffer *tb, u64 mask)
+{
+	unsigned int i;
+
+	for (i = 0; i < tb->trace_enable_entry_count; i++)
+		kbasep_csf_firmware_trace_buffer_update_trace_enable_bit(tb, i, (mask >> i) & 1);
+}
 
 #define U32_BITS 32
-static u64 get_trace_buffer_active_mask64(struct firmware_trace_buffer *tb)
+u64 kbase_csf_firmware_trace_buffer_get_active_mask64(struct firmware_trace_buffer *tb)
 {
 	u64 active_mask = tb->trace_enable_init_mask[0];
 
@@ -526,18 +681,7 @@ static u64 get_trace_buffer_active_mask64(struct firmware_trace_buffer *tb)
 	return active_mask;
 }
 
-static void update_trace_buffer_active_mask64(struct firmware_trace_buffer *tb,
-		u64 mask)
-{
-	unsigned int i;
-
-	for (i = 0; i < tb->trace_enable_entry_count; i++)
-		kbasep_csf_firmware_trace_buffer_update_trace_enable_bit(
-			tb, i, (mask >> i) & 1);
-}
-
-static int set_trace_buffer_active_mask64(struct firmware_trace_buffer *tb,
-		u64 mask)
+int kbase_csf_firmware_trace_buffer_set_active_mask64(struct firmware_trace_buffer *tb, u64 mask)
 {
 	struct kbase_device *kbdev = tb->kbdev;
 	unsigned long flags;
@@ -566,123 +710,36 @@ static int set_trace_buffer_active_mask64(struct firmware_trace_buffer *tb,
 	return err;
 }
 
-static int kbase_csf_firmware_trace_enable_mask_read(void *data, u64 *val)
+#if IS_ENABLED(CONFIG_MALI_MTK_KE_DUMP_FWLOG)
+void mtk_kbase_csf_firmware_ke_dump_fwlog(struct kbase_device *kbdev)
 {
-	struct kbase_device *kbdev = (struct kbase_device *)data;
+	unsigned int read_size, total_size = 0;
 	struct firmware_trace_buffer *tb =
-		kbase_csf_firmware_get_trace_buffer(kbdev, FW_TRACE_BUF_NAME);
-
-	if (tb == NULL) {
-		dev_err(kbdev->dev, "Couldn't get the firmware trace buffer");
-		return -EIO;
+		kbase_csf_firmware_get_trace_buffer(kbdev, KBASE_CSFFW_LOG_BUF_NAME);
+	if (tb == NULL || g_fw_dump_dest == NULL) {
+		dev_info(kbdev->dev, "Can't get the trace buffer, firmware trace dump skipped");
+		return;
 	}
-	/* The enabled traces limited to u64 here, regarded practical */
-	*val = get_trace_buffer_active_mask64(tb);
-	return 0;
+	while ((read_size = kbase_csf_firmware_trace_buffer_read_data(tb, g_buf, PAGE_SIZE))) {
+		total_size += read_size;
+		if (total_size <= PAGE_SIZE * 256) {
+			memcpy_toio(g_fw_dump_dest, g_buf, read_size);
+			g_fw_dump_dest +=read_size;
+		} else {
+			dev_info(kbdev->dev, "fwlog dump size > 1MB");
+			break;
+		}
+	}
+	dev_info(kbdev->dev, "[CSFFW]:(ke)dump fwlog size = 0x%x\n", total_size);
+
+	/* printf "[Cut]:fwlog end of file" at END of SYS_MALI_CSFFW_LOG */
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+	if (total_size < (PAGE_SIZE * 256 - FWLOG_EOF_LEN))
+		memcpy_toio(g_fw_dump_dest, fw_content, FWLOG_EOF_LEN);
+#else
+	if (total_size < (PAGE_SIZE * 256 - FWLOG_EOF_LEN))
+		memcpy_toio(g_fw_dump_dest, fw_eof_content, FWLOG_EOF_LEN);
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
 }
-
-static int kbase_csf_firmware_trace_enable_mask_write(void *data, u64 val)
-{
-	struct kbase_device *kbdev = (struct kbase_device *)data;
-	struct firmware_trace_buffer *tb =
-		kbase_csf_firmware_get_trace_buffer(kbdev, FW_TRACE_BUF_NAME);
-	u64 new_mask;
-	unsigned int enable_bits_count;
-
-	if (tb == NULL) {
-		dev_err(kbdev->dev, "Couldn't get the firmware trace buffer");
-		return -EIO;
-	}
-
-	/* Ignore unsupported types */
-	enable_bits_count =
-	    kbase_csf_firmware_trace_buffer_get_trace_enable_bits_count(tb);
-	if (enable_bits_count > 64) {
-		dev_vdbg(kbdev->dev, "Limit enabled bits count from %u to 64",
-			enable_bits_count);
-		enable_bits_count = 64;
-	}
-	new_mask = val & ((1 << enable_bits_count) - 1);
-
-	if (new_mask != get_trace_buffer_active_mask64(tb))
-		return set_trace_buffer_active_mask64(tb, new_mask);
-	else
-		return 0;
-}
-
-static int kbasep_csf_firmware_trace_debugfs_open(struct inode *in,
-		struct file *file)
-{
-	struct kbase_device *kbdev = in->i_private;
-
-	file->private_data = kbdev;
-	dev_vdbg(kbdev->dev, "Opened firmware trace buffer dump debugfs file");
-
-	return 0;
-}
-
-static ssize_t kbasep_csf_firmware_trace_debugfs_read(struct file *file,
-		char __user *buf, size_t size, loff_t *ppos)
-{
-	struct kbase_device *kbdev = file->private_data;
-	u8 *pbyte;
-	unsigned int n_read;
-	unsigned long not_copied;
-	/* Limit the kernel buffer to no more than two pages */
-	size_t mem = MIN(size, 2 * PAGE_SIZE);
-	unsigned long flags;
-
-	struct firmware_trace_buffer *tb =
-		kbase_csf_firmware_get_trace_buffer(kbdev, FW_TRACE_BUF_NAME);
-
-	if (tb == NULL) {
-		dev_err(kbdev->dev, "Couldn't get the firmware trace buffer");
-		return -EIO;
-	}
-
-	pbyte = kmalloc(mem, GFP_KERNEL);
-	if (pbyte == NULL) {
-		dev_err(kbdev->dev, "Couldn't allocate memory for trace buffer dump");
-		return -ENOMEM;
-	}
-
-	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
-	n_read = kbase_csf_firmware_trace_buffer_read_data(tb, pbyte, mem);
-	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
-
-	/* Do the copy, if we have obtained some trace data */
-	not_copied = (n_read) ? copy_to_user(buf, pbyte, n_read) : 0;
-	kfree(pbyte);
-
-	if (!not_copied) {
-		*ppos += n_read;
-		return n_read;
-	}
-
-	dev_err(kbdev->dev, "Couldn't copy trace buffer data to user space buffer");
-	return -EFAULT;
-}
-
-
-DEFINE_SIMPLE_ATTRIBUTE(kbase_csf_firmware_trace_enable_mask_fops,
-		kbase_csf_firmware_trace_enable_mask_read,
-		kbase_csf_firmware_trace_enable_mask_write, "%llx\n");
-
-static const struct file_operations kbasep_csf_firmware_trace_debugfs_fops = {
-	.owner = THIS_MODULE,
-	.open = kbasep_csf_firmware_trace_debugfs_open,
-	.read = kbasep_csf_firmware_trace_debugfs_read,
-	.llseek = no_llseek,
-};
-
-void kbase_csf_firmware_trace_buffer_debugfs_init(struct kbase_device *kbdev)
-{
-	debugfs_create_file("fw_trace_enable_mask", 0644,
-			    kbdev->mali_debugfs_directory, kbdev,
-			    &kbase_csf_firmware_trace_enable_mask_fops);
-
-	debugfs_create_file("fw_traces", 0444,
-			    kbdev->mali_debugfs_directory, kbdev,
-			    &kbasep_csf_firmware_trace_debugfs_fops);
-}
-#endif /* CONFIG_DEBUG_FS */
+EXPORT_SYMBOL(mtk_kbase_csf_firmware_ke_dump_fwlog);
+#endif /* CONFIG_MALI_MTK_KE_DUMP_FWLOG */

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2015-2023 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2015-2024 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -24,9 +24,6 @@
 #include "mali_kbase_tracepoints.h"
 
 #include <mali_kbase.h>
-#include <mali_kbase_jm.h>
-
-#include <linux/anon_inodes.h>
 #include <linux/atomic.h>
 #include <linux/file.h>
 #include <linux/mutex.h>
@@ -35,85 +32,21 @@
 #include <linux/stringify.h>
 #include <linux/timer.h>
 #include <linux/wait.h>
-
+#include <linux/delay.h>
 
 /* The period of autoflush checker execution in milliseconds. */
 #define AUTOFLUSH_INTERVAL 1000 /* ms */
 
 /*****************************************************************************/
 
-#ifndef MALI_STRIP_KBASE_DEVELOPMENT
-/* Development builds need to test instrumentation and enable unprivileged
- * processes to acquire timeline streams, in order to avoid complications
- * with configurations across multiple platforms and systems.
- *
- * Release builds, instead, shall deny access to unprivileged processes
- * because there are no use cases where they are allowed to acquire timeline
- * streams, unless they're given special permissions by a privileged process.
- */
-static int kbase_unprivileged_global_profiling = 1;
-#else
-static int kbase_unprivileged_global_profiling;
-#endif
-
-/**
- * kbase_unprivileged_global_profiling_set - set permissions for unprivileged processes
- *
- * @val: String containing value to set. Only strings representing positive
- *       integers are accepted as valid; any non-positive integer (including 0)
- *       is rejected.
- * @kp: Module parameter associated with this method.
- *
- * This method can only be used to enable permissions for unprivileged processes,
- * if they are disabled: for this reason, the only values which are accepted are
- * strings representing positive integers. Since it's impossible to disable
- * permissions once they're set, any integer which is non-positive is rejected,
- * including 0.
- *
- * Return: 0 if success, otherwise error code.
- */
-static int kbase_unprivileged_global_profiling_set(const char *val, const struct kernel_param *kp)
-{
-	int new_val;
-	int ret = kstrtoint(val, 0, &new_val);
-
-	if (ret == 0) {
-		if (new_val < 1)
-			return -EINVAL;
-
-		kbase_unprivileged_global_profiling = 1;
-	}
-
-	return ret;
-}
-
-static const struct kernel_param_ops kbase_global_unprivileged_profiling_ops = {
-	.get = param_get_int,
-	.set = kbase_unprivileged_global_profiling_set,
-};
-
-module_param_cb(kbase_unprivileged_global_profiling, &kbase_global_unprivileged_profiling_ops,
-		&kbase_unprivileged_global_profiling, 0600);
-
 /* These values are used in mali_kbase_tracepoints.h
  * to retrieve the streams from a kbase_timeline instance.
  */
-const size_t __obj_stream_offset =
-	offsetof(struct kbase_timeline, streams)
-	+ sizeof(struct kbase_tlstream) * TL_STREAM_TYPE_OBJ;
+const size_t __obj_stream_offset = offsetof(struct kbase_timeline, streams) +
+				   sizeof(struct kbase_tlstream) * TL_STREAM_TYPE_OBJ;
 
-const size_t __aux_stream_offset =
-	offsetof(struct kbase_timeline, streams)
-	+ sizeof(struct kbase_tlstream) * TL_STREAM_TYPE_AUX;
-
-static bool timeline_is_permitted(void)
-{
-#if KERNEL_VERSION(5, 8, 0) <= LINUX_VERSION_CODE
-	return kbase_unprivileged_global_profiling || perfmon_capable();
-#else
-	return kbase_unprivileged_global_profiling || capable(CAP_SYS_ADMIN);
-#endif
-}
+const size_t __aux_stream_offset = offsetof(struct kbase_timeline, streams) +
+				   sizeof(struct kbase_tlstream) * TL_STREAM_TYPE_AUX;
 
 /**
  * kbasep_timeline_autoflush_timer_callback - autoflush timer callback
@@ -125,14 +58,13 @@ static bool timeline_is_permitted(void)
 static void kbasep_timeline_autoflush_timer_callback(struct timer_list *timer)
 {
 	enum tl_stream_type stype;
-	int                 rcode;
+	int rcode;
 	struct kbase_timeline *timeline =
 		container_of(timer, struct kbase_timeline, autoflush_timer);
 
 	CSTD_UNUSED(timer);
 
-	for (stype = (enum tl_stream_type)0; stype < TL_STREAM_TYPE_COUNT;
-			stype++) {
+	for (stype = (enum tl_stream_type)0; stype < TL_STREAM_TYPE_COUNT; stype++) {
 		struct kbase_tlstream *stream = &timeline->streams[stype];
 
 		int af_cnt = atomic_read(&stream->autoflush_counter);
@@ -142,10 +74,7 @@ static void kbasep_timeline_autoflush_timer_callback(struct timer_list *timer)
 			continue;
 
 		/* Check if stream should be flushed now. */
-		if (af_cnt != atomic_cmpxchg(
-					&stream->autoflush_counter,
-					af_cnt,
-					af_cnt + 1))
+		if (af_cnt != atomic_cmpxchg(&stream->autoflush_counter, af_cnt, af_cnt + 1))
 			continue;
 		if (!af_cnt)
 			continue;
@@ -155,24 +84,18 @@ static void kbasep_timeline_autoflush_timer_callback(struct timer_list *timer)
 	}
 
 	if (atomic_read(&timeline->autoflush_timer_active))
-		rcode = mod_timer(
-				&timeline->autoflush_timer,
-				jiffies + msecs_to_jiffies(AUTOFLUSH_INTERVAL));
+		rcode = mod_timer(&timeline->autoflush_timer,
+				  jiffies + msecs_to_jiffies(AUTOFLUSH_INTERVAL));
 	CSTD_UNUSED(rcode);
 }
 
-
-
 /*****************************************************************************/
 
-int kbase_timeline_init(struct kbase_timeline **timeline,
-		atomic_t *timeline_flags)
+int kbase_timeline_init(struct kbase_timeline **timeline, atomic_t *timeline_flags)
 {
-	enum tl_stream_type i;
 	struct kbase_timeline *result;
-#if MALI_USE_CSF
 	struct kbase_tlstream *csffw_stream;
-#endif
+	int i;
 
 	if (!timeline || !timeline_flags)
 		return -EINVAL;
@@ -182,12 +105,11 @@ int kbase_timeline_init(struct kbase_timeline **timeline,
 		return -ENOMEM;
 
 	mutex_init(&result->reader_lock);
+	mutex_init(&result->streams_buf_lock);
 	init_waitqueue_head(&result->event_queue);
 
-	/* Prepare stream structures. */
 	for (i = 0; i < TL_STREAM_TYPE_COUNT; i++)
-		kbase_tlstream_init(&result->streams[i], i,
-			&result->event_queue);
+		spin_lock_init(&result->streams[i].lock);
 
 	/* Initialize the kctx list */
 	mutex_init(&result->tl_kctx_list_lock);
@@ -195,14 +117,11 @@ int kbase_timeline_init(struct kbase_timeline **timeline,
 
 	/* Initialize autoflush timer. */
 	atomic_set(&result->autoflush_timer_active, 0);
-	kbase_timer_setup(&result->autoflush_timer,
-			  kbasep_timeline_autoflush_timer_callback);
+	kbase_timer_setup(&result->autoflush_timer, kbasep_timeline_autoflush_timer_callback);
 	result->timeline_flags = timeline_flags;
 
-#if MALI_USE_CSF
 	csffw_stream = &result->streams[TL_STREAM_TYPE_CSFFW];
 	kbase_csf_tl_reader_init(&result->csf_tl_reader, csffw_stream);
-#endif
 
 	*timeline = result;
 	return 0;
@@ -215,14 +134,17 @@ void kbase_timeline_term(struct kbase_timeline *timeline)
 	if (!timeline)
 		return;
 
-#if MALI_USE_CSF
 	kbase_csf_tl_reader_term(&timeline->csf_tl_reader);
-#endif
 
 	WARN_ON(!list_empty(&timeline->tl_kctx_list));
 
-	for (i = (enum tl_stream_type)0; i < TL_STREAM_TYPE_COUNT; i++)
+	mutex_lock(&timeline->streams_buf_lock);
+	for (i = (enum tl_stream_type)0; i < TL_STREAM_TYPE_COUNT; i++) {
+		vfree(timeline->streams[i].buffer);
+		timeline->streams[i].buffer = NULL;
 		kbase_tlstream_term(&timeline->streams[i]);
+	}
+	mutex_unlock(&timeline->streams_buf_lock);
 
 	vfree(timeline);
 }
@@ -246,91 +168,114 @@ static void kbase_tlstream_current_devfreq_target(struct kbase_device *kbdev)
 }
 #endif /* CONFIG_MALI_DEVFREQ */
 
-int kbase_timeline_io_acquire(struct kbase_device *kbdev, u32 flags)
+int kbase_timeline_acquire(struct kbase_device *kbdev, u32 flags)
 {
-	int ret = 0;
+	int err = 0;
 	u32 timeline_flags = TLSTREAM_ENABLED | flags;
-	struct kbase_timeline *timeline = kbdev->timeline;
+	struct kbase_timeline *timeline;
+	int rcode;
+	void *buffer;
+	int i;
+	int j;
 
-	if (!timeline_is_permitted())
-		return -EPERM;
+	if (WARN_ON(!kbdev) || WARN_ON(flags & ~BASE_TLSTREAM_FLAGS_MASK))
+		return -EINVAL;
 
-	if (!atomic_cmpxchg(timeline->timeline_flags, 0, timeline_flags)) {
-		int rcode;
+	timeline = kbdev->timeline;
+	if (WARN_ON(!timeline))
+		return -EFAULT;
 
-#if MALI_USE_CSF
-		if (flags & BASE_TLSTREAM_ENABLE_CSFFW_TRACEPOINTS) {
-			ret = kbase_csf_tl_reader_start(
-				&timeline->csf_tl_reader, kbdev);
-			if (ret)
-			{
-				atomic_set(timeline->timeline_flags, 0);
-				return ret;
+	mutex_lock(&timeline->streams_buf_lock);
+	if (!(timeline->streams[0].buffer)) {
+		for (i = 0; i < TL_STREAM_TYPE_COUNT; i++) {
+			buffer = vzalloc(sizeof(struct kbase_tlstream_buf) * PACKET_COUNT);
+			if (!buffer) {
+				for (j = i - 1; j >= 0; j--) {
+					vfree(timeline->streams[j].buffer);
+					timeline->streams[j].buffer = NULL;
+				}
+				mutex_unlock(&timeline->streams_buf_lock);
+				return -ENOMEM;
 			}
+			timeline->streams[i].buffer = buffer;
+			kbase_tlstream_init(&timeline->streams[i], i, &timeline->event_queue);
 		}
-#endif
-		ret = anon_inode_getfd(
-				"[mali_tlstream]",
-				&kbasep_tlstream_fops,
-				timeline,
-				O_RDONLY | O_CLOEXEC);
-		if (ret < 0) {
+	}
+	mutex_unlock(&timeline->streams_buf_lock);
+
+	if (atomic_cmpxchg(timeline->timeline_flags, 0, (int)timeline_flags))
+		return -EBUSY;
+
+	if (flags & BASE_TLSTREAM_ENABLE_CSFFW_TRACEPOINTS) {
+		err = kbase_csf_tl_reader_start(&timeline->csf_tl_reader, kbdev);
+		if (err) {
 			atomic_set(timeline->timeline_flags, 0);
-#if MALI_USE_CSF
-			kbase_csf_tl_reader_stop(&timeline->csf_tl_reader);
-#endif
-			return ret;
+			return err;
 		}
-
-		/* Reset and initialize header streams. */
-		kbase_tlstream_reset(
-			&timeline->streams[TL_STREAM_TYPE_OBJ_SUMMARY]);
-
-		timeline->obj_header_btc = obj_desc_header_size;
-		timeline->aux_header_btc = aux_desc_header_size;
-
-		/* Start autoflush timer. */
-		atomic_set(&timeline->autoflush_timer_active, 1);
-		rcode = mod_timer(
-				&timeline->autoflush_timer,
-				jiffies + msecs_to_jiffies(AUTOFLUSH_INTERVAL));
-		CSTD_UNUSED(rcode);
-
-#if !MALI_USE_CSF
-		/* If job dumping is enabled, readjust the software event's
-		 * timeout as the default value of 3 seconds is often
-		 * insufficient.
-		 */
-		if (flags & BASE_TLSTREAM_JOB_DUMPING_ENABLED) {
-			dev_info(kbdev->dev,
-					"Job dumping is enabled, readjusting the software event's timeout\n");
-			atomic_set(&kbdev->js_data.soft_job_timeout_ms,
-					1800000);
-		}
-#endif /* !MALI_USE_CSF */
-
-		/* Summary stream was cleared during acquire.
-		 * Create static timeline objects that will be
-		 * read by client.
-		 */
-		kbase_create_timeline_objects(kbdev);
-
-#ifdef CONFIG_MALI_DEVFREQ
-		/* Devfreq target tracepoints are only fired when the target
-		 * changes, so we won't know the current target unless we
-		 * send it now.
-		 */
-		kbase_tlstream_current_devfreq_target(kbdev);
-#endif /* CONFIG_MALI_DEVFREQ */
-
-	} else {
-		ret = -EBUSY;
 	}
 
-	if (ret >= 0)
-		timeline->last_acquire_time = ktime_get();
+	/* Reset and initialize header streams. */
+	kbase_tlstream_reset(&timeline->streams[TL_STREAM_TYPE_OBJ_SUMMARY]);
 
-	return ret;
+	timeline->obj_header_btc = obj_desc_header_size;
+	timeline->aux_header_btc = aux_desc_header_size;
+
+	/* Summary stream was cleared during acquire.
+	 * Create static timeline objects that will be
+	 * read by client.
+	 */
+	kbase_create_timeline_objects(kbdev);
+
+#ifdef CONFIG_MALI_DEVFREQ
+	/* Devfreq target tracepoints are only fired when the target
+	 * changes, so we won't know the current target unless we
+	 * send it now.
+	 */
+	kbase_tlstream_current_devfreq_target(kbdev);
+#endif /* CONFIG_MALI_DEVFREQ */
+
+	/* Start the autoflush timer.
+	 * We must do this after creating timeline objects to ensure we
+	 * don't auto-flush the streams which will be reset during the
+	 * summarization process.
+	 */
+	atomic_set(&timeline->autoflush_timer_active, 1);
+	rcode = mod_timer(&timeline->autoflush_timer,
+			  jiffies + msecs_to_jiffies(AUTOFLUSH_INTERVAL));
+	CSTD_UNUSED(rcode);
+
+	timeline->last_acquire_time = ktime_get_raw();
+
+	return err;
+}
+
+void kbase_timeline_release(struct kbase_timeline *timeline)
+{
+	ktime_t elapsed_time;
+	s64 elapsed_time_ms, time_to_sleep;
+
+	if (WARN_ON(!timeline) || WARN_ON(!atomic_read(timeline->timeline_flags)))
+		return;
+
+	/* Get the amount of time passed since the timeline was acquired and ensure
+	 * we sleep for long enough such that it has been at least
+	 * TIMELINE_HYSTERESIS_TIMEOUT_MS amount of time between acquire and release.
+	 * This prevents userspace from spamming acquire and release too quickly.
+	 */
+	elapsed_time = ktime_sub(ktime_get_raw(), timeline->last_acquire_time);
+	elapsed_time_ms = ktime_to_ms(elapsed_time);
+	time_to_sleep = (elapsed_time_ms < 0 ? TIMELINE_HYSTERESIS_TIMEOUT_MS :
+						     TIMELINE_HYSTERESIS_TIMEOUT_MS - elapsed_time_ms);
+	if (time_to_sleep > 0)
+		msleep_interruptible(time_to_sleep);
+
+	kbase_csf_tl_reader_stop(&timeline->csf_tl_reader);
+
+	/* Stop autoflush timer before releasing access to streams. */
+	atomic_set(&timeline->autoflush_timer_active, 0);
+	del_timer_sync(&timeline->autoflush_timer);
+
+	atomic_set(timeline->timeline_flags, 0);
 }
 
 int kbase_timeline_streams_flush(struct kbase_timeline *timeline)
@@ -338,12 +283,16 @@ int kbase_timeline_streams_flush(struct kbase_timeline *timeline)
 	enum tl_stream_type stype;
 	bool has_bytes = false;
 	size_t nbytes = 0;
-#if MALI_USE_CSF
-	int ret = kbase_csf_tl_reader_flush_buffer(&timeline->csf_tl_reader);
 
-	if (ret > 0)
-		has_bytes = true;
-#endif
+	if (WARN_ON(!timeline))
+		return -EINVAL;
+
+	{
+		int ret = kbase_csf_tl_reader_flush_buffer(&timeline->csf_tl_reader);
+
+		if (ret > 0)
+			has_bytes = true;
+	}
 
 	for (stype = 0; stype < TL_STREAM_TYPE_COUNT; stype++) {
 		nbytes = kbase_tlstream_flush_stream(&timeline->streams[stype]);
@@ -355,14 +304,9 @@ int kbase_timeline_streams_flush(struct kbase_timeline *timeline)
 
 void kbase_timeline_streams_body_reset(struct kbase_timeline *timeline)
 {
-	kbase_tlstream_reset(
-			&timeline->streams[TL_STREAM_TYPE_OBJ]);
-	kbase_tlstream_reset(
-			&timeline->streams[TL_STREAM_TYPE_AUX]);
-#if MALI_USE_CSF
-	kbase_tlstream_reset(
-			&timeline->streams[TL_STREAM_TYPE_CSFFW]);
-#endif
+	kbase_tlstream_reset(&timeline->streams[TL_STREAM_TYPE_OBJ]);
+	kbase_tlstream_reset(&timeline->streams[TL_STREAM_TYPE_AUX]);
+	kbase_tlstream_reset(&timeline->streams[TL_STREAM_TYPE_CSFFW]);
 }
 
 void kbase_timeline_pre_kbase_context_destroy(struct kbase_context *kctx)
@@ -404,10 +348,7 @@ void kbase_timeline_post_kbase_context_create(struct kbase_context *kctx)
 	 * never in parallel with it. If fired in parallel, we could get
 	 * duplicate creation tracepoints.
 	 */
-#if MALI_USE_CSF
-	KBASE_TLSTREAM_TL_KBASE_NEW_CTX(
-		kbdev, kctx->id, kbdev->gpu_props.props.raw_props.gpu_id);
-#endif
+	KBASE_TLSTREAM_TL_KBASE_NEW_CTX(kbdev, kctx->id, kbdev->id);
 	/* Trace with the AOM tracepoint even in CSF for dumping */
 	KBASE_TLSTREAM_TL_NEW_CTX(kbdev, kctx, kctx->id, 0);
 
@@ -420,9 +361,7 @@ void kbase_timeline_post_kbase_context_destroy(struct kbase_context *kctx)
 
 	/* Trace with the AOM tracepoint even in CSF for dumping */
 	KBASE_TLSTREAM_TL_DEL_CTX(kbdev, kctx);
-#if MALI_USE_CSF
 	KBASE_TLSTREAM_TL_KBASE_DEL_CTX(kbdev, kctx->id);
-#endif
 
 	/* Flush the timeline stream, so the user can see the termination
 	 * tracepoints being fired.
@@ -434,8 +373,8 @@ void kbase_timeline_post_kbase_context_destroy(struct kbase_context *kctx)
 }
 
 #if MALI_UNIT_TEST
-void kbase_timeline_stats(struct kbase_timeline *timeline,
-		u32 *bytes_collected, u32 *bytes_generated)
+void kbase_timeline_stats(struct kbase_timeline *timeline, u32 *bytes_collected,
+			  u32 *bytes_generated)
 {
 	enum tl_stream_type stype;
 
@@ -443,11 +382,9 @@ void kbase_timeline_stats(struct kbase_timeline *timeline,
 
 	/* Accumulate bytes generated per stream  */
 	*bytes_generated = 0;
-	for (stype = (enum tl_stream_type)0; stype < TL_STREAM_TYPE_COUNT;
-			stype++)
-		*bytes_generated += atomic_read(
-			&timeline->streams[stype].bytes_generated);
+	for (stype = (enum tl_stream_type)0; stype < TL_STREAM_TYPE_COUNT; stype++)
+		*bytes_generated += (u32)atomic_read(&timeline->streams[stype].bytes_generated);
 
-	*bytes_collected = atomic_read(&timeline->bytes_collected);
+	*bytes_collected = (u32)atomic_read(&timeline->bytes_collected);
 }
 #endif /* MALI_UNIT_TEST */

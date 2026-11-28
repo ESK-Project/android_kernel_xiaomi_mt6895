@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2019-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2019-2024 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -20,8 +20,7 @@
  */
 
 /**
- * @file
- * Mali arbiter power manager state machine and APIs
+ * DOC: Mali arbiter power manager state machine and APIs
  */
 
 #ifndef _MALI_KBASE_ARBITER_PM_H_
@@ -102,18 +101,20 @@ void kbase_arbiter_pm_release_interrupts(struct kbase_device *kbdev);
  * @kbdev: The kbase device structure for the device (must be a valid pointer)
  *
  * Install interrupts and set the interrupt_install flag to true.
+ *
+ * Return: 0 if success or already installed. Otherwise a Linux error code
  */
 int kbase_arbiter_pm_install_interrupts(struct kbase_device *kbdev);
 
 /**
  * kbase_arbiter_pm_vm_event() - Dispatch VM event to the state machine
  * @kbdev: The kbase device structure for the device (must be a valid pointer)
+ * @event: The event to dispatch
  *
  * The state machine function. Receives events and transitions states
  * according the event received and the current state
  */
-void kbase_arbiter_pm_vm_event(struct kbase_device *kbdev,
-	enum kbase_arbif_evt event);
+void kbase_arbiter_pm_vm_event(struct kbase_device *kbdev, enum kbase_arbif_evt event);
 
 /**
  * kbase_arbiter_pm_ctx_active_handle_suspend() - Handle suspend operation for
@@ -121,6 +122,8 @@ void kbase_arbiter_pm_vm_event(struct kbase_device *kbdev,
  * @kbdev: The kbase device structure for the device (must be a valid pointer)
  * @suspend_handler: The handler code for how to handle a suspend
  *                   that might occur
+ * @sched_lock_held: Flag variable that tells whether the caller grabs the
+ *                   scheduler lock or not
  *
  * This function handles a suspend event from the driver,
  * communicating with the arbiter and waiting synchronously for the GPU
@@ -129,8 +132,8 @@ void kbase_arbiter_pm_vm_event(struct kbase_device *kbdev,
  * Return: 0 if success, 1 if failure due to system suspending/suspended
  */
 int kbase_arbiter_pm_ctx_active_handle_suspend(struct kbase_device *kbdev,
-	enum kbase_pm_suspend_handler suspend_handler);
-
+					       enum kbase_pm_suspend_handler suspend_handler,
+					       bool sched_lock_held);
 
 /**
  * kbase_arbiter_pm_vm_stopped() - Handle stop event for the VM
@@ -150,8 +153,7 @@ void kbase_arbiter_pm_vm_stopped(struct kbase_device *kbdev);
  * This function handles a stop event for the VM.
  * It will update the VM state and forward the stop event to the driver.
  */
-void kbase_arbiter_set_max_config(struct kbase_device *kbdev,
-				  uint32_t max_l2_slices,
+void kbase_arbiter_set_max_config(struct kbase_device *kbdev, uint32_t max_l2_slices,
 				  uint32_t max_core_mask);
 
 /**
@@ -188,7 +190,6 @@ struct kbase_arbiter_freq {
  *
  * Updates the GPU frequency and triggers any notifications
  */
-void kbase_arbiter_pm_update_gpu_freq(struct kbase_arbiter_freq *arb_freq,
-	uint32_t freq);
+void kbase_arbiter_pm_update_gpu_freq(struct kbase_arbiter_freq *arb_freq, uint32_t freq);
 
 #endif /*_MALI_KBASE_ARBITER_PM_H_ */

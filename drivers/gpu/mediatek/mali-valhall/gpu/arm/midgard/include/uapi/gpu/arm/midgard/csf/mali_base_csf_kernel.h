@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2020-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2020-2024 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -23,212 +23,12 @@
 #define _UAPI_BASE_CSF_KERNEL_H_
 
 #include <linux/types.h>
+#include "../mali_base_common_kernel.h"
 
-/* Memory allocation, access/hint flags.
- *
- * See base_mem_alloc_flags.
- */
-
-/* IN */
-/* Read access CPU side
- */
-#define BASE_MEM_PROT_CPU_RD ((base_mem_alloc_flags)1 << 0)
-
-/* Write access CPU side
- */
-#define BASE_MEM_PROT_CPU_WR ((base_mem_alloc_flags)1 << 1)
-
-/* Read access GPU side
- */
-#define BASE_MEM_PROT_GPU_RD ((base_mem_alloc_flags)1 << 2)
-
-/* Write access GPU side
- */
-#define BASE_MEM_PROT_GPU_WR ((base_mem_alloc_flags)1 << 3)
-
-/* Execute allowed on the GPU side
- */
-#define BASE_MEM_PROT_GPU_EX ((base_mem_alloc_flags)1 << 4)
-
-/* Will be permanently mapped in kernel space.
- * Flag is only allowed on allocations originating from kbase.
- */
-#define BASEP_MEM_PERMANENT_KERNEL_MAPPING ((base_mem_alloc_flags)1 << 5)
-
-/* The allocation will completely reside within the same 4GB chunk in the GPU
- * virtual space.
- * Since this flag is primarily required only for the TLS memory which will
- * not be used to contain executable code and also not used for Tiler heap,
- * it can't be used along with BASE_MEM_PROT_GPU_EX and TILER_ALIGN_TOP flags.
- */
-#define BASE_MEM_GPU_VA_SAME_4GB_PAGE ((base_mem_alloc_flags)1 << 6)
-
-/* Userspace is not allowed to free this memory.
- * Flag is only allowed on allocations originating from kbase.
- */
-#define BASEP_MEM_NO_USER_FREE ((base_mem_alloc_flags)1 << 7)
-
-#define BASE_MEM_RESERVED_BIT_8 ((base_mem_alloc_flags)1 << 8)
-
-/* Grow backing store on GPU Page Fault
- */
-#define BASE_MEM_GROW_ON_GPF ((base_mem_alloc_flags)1 << 9)
-
-/* Page coherence Outer shareable, if available
- */
-#define BASE_MEM_COHERENT_SYSTEM ((base_mem_alloc_flags)1 << 10)
-
-/* Page coherence Inner shareable
- */
-#define BASE_MEM_COHERENT_LOCAL ((base_mem_alloc_flags)1 << 11)
-
-/* IN/OUT */
-/* Should be cached on the CPU, returned if actually cached
- */
-#define BASE_MEM_CACHED_CPU ((base_mem_alloc_flags)1 << 12)
-
-/* IN/OUT */
-/* Must have same VA on both the GPU and the CPU
- */
-#define BASE_MEM_SAME_VA ((base_mem_alloc_flags)1 << 13)
-
-/* OUT */
-/* Must call mmap to acquire a GPU address for the alloc
- */
-#define BASE_MEM_NEED_MMAP ((base_mem_alloc_flags)1 << 14)
-
-/* IN */
-/* Page coherence Outer shareable, required.
- */
-#define BASE_MEM_COHERENT_SYSTEM_REQUIRED ((base_mem_alloc_flags)1 << 15)
-
-/* Protected memory
- */
-#define BASE_MEM_PROTECTED ((base_mem_alloc_flags)1 << 16)
-
-/* Not needed physical memory
- */
-#define BASE_MEM_DONT_NEED ((base_mem_alloc_flags)1 << 17)
-
-/* Must use shared CPU/GPU zone (SAME_VA zone) but doesn't require the
- * addresses to be the same
- */
-#define BASE_MEM_IMPORT_SHARED ((base_mem_alloc_flags)1 << 18)
-
-/* CSF event memory
- *
- * If Outer shareable coherence is not specified or not available, then on
- * allocation kbase will automatically use the uncached GPU mapping.
- * There is no need for the client to specify BASE_MEM_UNCACHED_GPU
- * themselves when allocating memory with the BASE_MEM_CSF_EVENT flag.
- *
- * This memory requires a permanent mapping
- *
- * See also kbase_reg_needs_kernel_mapping()
- */
-#define BASE_MEM_CSF_EVENT ((base_mem_alloc_flags)1 << 19)
-
-#define BASE_MEM_RESERVED_BIT_20 ((base_mem_alloc_flags)1 << 20)
-
-/* Should be uncached on the GPU, will work only for GPUs using AARCH64 mmu
- * mode. Some components within the GPU might only be able to access memory
- * that is GPU cacheable. Refer to the specific GPU implementation for more
- * details. The 3 shareability flags will be ignored for GPU uncached memory.
- * If used while importing USER_BUFFER type memory, then the import will fail
- * if the memory is not aligned to GPU and CPU cache line width.
- */
-#define BASE_MEM_UNCACHED_GPU ((base_mem_alloc_flags)1 << 21)
-
-/*
- * Bits [22:25] for group_id (0~15).
- *
- * base_mem_group_id_set() should be used to pack a memory group ID into a
- * base_mem_alloc_flags value instead of accessing the bits directly.
- * base_mem_group_id_get() should be used to extract the memory group ID from
- * a base_mem_alloc_flags value.
- */
-#define BASEP_MEM_GROUP_ID_SHIFT 22
-#define BASE_MEM_GROUP_ID_MASK \
-	((base_mem_alloc_flags)0xF << BASEP_MEM_GROUP_ID_SHIFT)
-
-/* Must do CPU cache maintenance when imported memory is mapped/unmapped
- * on GPU. Currently applicable to dma-buf type only.
- */
-#define BASE_MEM_IMPORT_SYNC_ON_MAP_UNMAP ((base_mem_alloc_flags)1 << 26)
-
-/* OUT */
-/* Kernel side cache sync ops required */
-#define BASE_MEM_KERNEL_SYNC ((base_mem_alloc_flags)1 << 28)
-
-/* Number of bits used as flags for base memory management
- *
- * Must be kept in sync with the base_mem_alloc_flags flags
- */
-#define BASE_MEM_FLAGS_NR_BITS 29
-
-/* A mask of all the flags which are only valid for allocations within kbase,
- * and may not be passed from user space.
- */
-#define BASEP_MEM_FLAGS_KERNEL_ONLY \
-	(BASEP_MEM_PERMANENT_KERNEL_MAPPING | BASEP_MEM_NO_USER_FREE)
-
-/* A mask for all output bits, excluding IN/OUT bits.
- */
-#define BASE_MEM_FLAGS_OUTPUT_MASK BASE_MEM_NEED_MMAP
-
-/* A mask for all input bits, including IN/OUT bits.
- */
-#define BASE_MEM_FLAGS_INPUT_MASK \
-	(((1 << BASE_MEM_FLAGS_NR_BITS) - 1) & ~BASE_MEM_FLAGS_OUTPUT_MASK)
-
-/* A mask of all currently reserved flags
- */
-#define BASE_MEM_FLAGS_RESERVED \
-	BASE_MEM_RESERVED_BIT_8 | BASE_MEM_RESERVED_BIT_20
-
-#define BASEP_MEM_INVALID_HANDLE               (0ull  << 12)
-#define BASE_MEM_MMU_DUMP_HANDLE               (1ull  << 12)
-#define BASE_MEM_TRACE_BUFFER_HANDLE           (2ull  << 12)
-#define BASE_MEM_MAP_TRACKING_HANDLE           (3ull  << 12)
-#define BASEP_MEM_WRITE_ALLOC_PAGES_HANDLE     (4ull  << 12)
-/* reserved handles ..-47<<PAGE_SHIFT> for future special handles */
-#define BASEP_MEM_CSF_USER_REG_PAGE_HANDLE     (47ul  << 12)
-#define BASEP_MEM_CSF_USER_IO_PAGES_HANDLE     (48ul  << 12)
-#define BASE_MEM_COOKIE_BASE                   (64ul  << 12)
-#define BASE_MEM_FIRST_FREE_ADDRESS            ((BITS_PER_LONG << 12) + \
-						BASE_MEM_COOKIE_BASE)
-
-#define KBASE_CSF_NUM_USER_IO_PAGES_HANDLE \
-	((BASE_MEM_COOKIE_BASE - BASEP_MEM_CSF_USER_IO_PAGES_HANDLE) >> \
-	 LOCAL_PAGE_SHIFT)
-
-/**
- * Valid set of just-in-time memory allocation flags
- */
+/* Valid set of just-in-time memory allocation flags */
 #define BASE_JIT_ALLOC_VALID_FLAGS ((__u8)0)
 
-/* Flags to pass to ::base_context_init.
- * Flags can be ORed together to enable multiple things.
- *
- * These share the same space as BASEP_CONTEXT_FLAG_*, and so must
- * not collide with them.
- */
-typedef __u32 base_context_create_flags;
-
-/* No flags set */
-#define BASE_CONTEXT_CREATE_FLAG_NONE ((base_context_create_flags)0)
-
-/* Base context is embedded in a cctx object (flag used for CINSTR
- * software counter macros)
- */
-#define BASE_CONTEXT_CCTX_EMBEDDED ((base_context_create_flags)1 << 0)
-
-/* Base context is a 'System Monitor' context for Hardware counters.
- *
- * One important side effect of this is that job submission is disabled.
- */
-#define BASE_CONTEXT_SYSTEM_MONITOR_SUBMIT_DISABLED \
-	((base_context_create_flags)1 << 1)
+/* flags for base context specific to CSF */
 
 /* Base context creates a CSF event notification thread.
  *
@@ -237,50 +37,24 @@ typedef __u32 base_context_create_flags;
  */
 #define BASE_CONTEXT_CSF_EVENT_THREAD ((base_context_create_flags)1 << 2)
 
-/* Bit-shift used to encode a memory group ID in base_context_create_flags
- */
-#define BASEP_CONTEXT_MMU_GROUP_ID_SHIFT (3)
-
-/* Bitmask used to encode a memory group ID in base_context_create_flags
- */
-#define BASEP_CONTEXT_MMU_GROUP_ID_MASK \
-	((base_context_create_flags)0xF << BASEP_CONTEXT_MMU_GROUP_ID_SHIFT)
-
-/* Bitpattern describing the base_context_create_flags that can be
- * passed to the kernel
- */
-#define BASEP_CONTEXT_CREATE_KERNEL_FLAGS \
-	(BASE_CONTEXT_SYSTEM_MONITOR_SUBMIT_DISABLED | \
-	 BASEP_CONTEXT_MMU_GROUP_ID_MASK)
-
 /* Bitpattern describing the ::base_context_create_flags that can be
  * passed to base_context_init()
  */
-#define BASEP_CONTEXT_CREATE_ALLOWED_FLAGS \
-	(BASE_CONTEXT_CCTX_EMBEDDED | \
-	 BASE_CONTEXT_CSF_EVENT_THREAD | \
+#define BASEP_CONTEXT_CREATE_ALLOWED_FLAGS                            \
+	(BASE_CONTEXT_CCTX_EMBEDDED | BASE_CONTEXT_CSF_EVENT_THREAD | \
 	 BASEP_CONTEXT_CREATE_KERNEL_FLAGS)
 
-/* Enable additional tracepoints for latency measurements (TL_ATOM_READY,
- * TL_ATOM_DONE, TL_ATOM_PRIO_CHANGE, TL_ATOM_EVENT_POST)
- */
-#define BASE_TLSTREAM_ENABLE_LATENCY_TRACEPOINTS (1 << 0)
-
-/* Indicate that job dumping is enabled. This could affect certain timers
- * to account for the performance impact.
- */
-#define BASE_TLSTREAM_JOB_DUMPING_ENABLED (1 << 1)
+/* Flags for base tracepoint specific to CSF */
 
 /* Enable KBase tracepoints for CSF builds */
-#define BASE_TLSTREAM_ENABLE_CSF_TRACEPOINTS (1 << 2)
+#define BASE_TLSTREAM_ENABLE_CSF_TRACEPOINTS (1U << 2)
 
 /* Enable additional CSF Firmware side tracepoints */
-#define BASE_TLSTREAM_ENABLE_CSFFW_TRACEPOINTS (1 << 3)
+#define BASE_TLSTREAM_ENABLE_CSFFW_TRACEPOINTS (1U << 3)
 
-#define BASE_TLSTREAM_FLAGS_MASK (BASE_TLSTREAM_ENABLE_LATENCY_TRACEPOINTS | \
-		BASE_TLSTREAM_JOB_DUMPING_ENABLED | \
-		BASE_TLSTREAM_ENABLE_CSF_TRACEPOINTS | \
-		BASE_TLSTREAM_ENABLE_CSFFW_TRACEPOINTS)
+#define BASE_TLSTREAM_FLAGS_MASK                                                        \
+	(BASE_TLSTREAM_ENABLE_LATENCY_TRACEPOINTS | BASE_TLSTREAM_JOB_DUMPING_ENABLED | \
+	 BASE_TLSTREAM_ENABLE_CSF_TRACEPOINTS | BASE_TLSTREAM_ENABLE_CSFFW_TRACEPOINTS)
 
 /* Number of pages mapped into the process address space for a bound GPU
  * command queue. A pair of input/output pages and a Hw doorbell page
@@ -313,7 +87,22 @@ typedef __u32 base_context_create_flags;
  */
 #define BASEP_KCPU_CQS_MAX_NUM_OBJS ((size_t)32)
 
-#if MALI_UNIT_TEST
+/* Minimum number of queue group supported by the GPU */
+#define BASEP_QUEUE_GROUP_MIN 1
+/* Maximum number of queue group supported by the GPU */
+#define BASEP_QUEUE_GROUP_MAX 31
+/* Minimum number of GPU queues per queue groups supported by the driver */
+#define BASEP_GPU_QUEUE_PER_QUEUE_GROUP_MIN 8
+/* Maximum number of GPU queues per queue groups supported by the driver */
+#define BASEP_GPU_QUEUE_PER_QUEUE_GROUP_MAX 32
+
+/* CSF CSI EXCEPTION_HANDLER_FLAGS */
+#define BASE_CSF_TILER_OOM_EXCEPTION_FLAG (1u << 0)
+#define BASE_CSF_EXCEPTION_HANDLER_FLAGS_MASK (BASE_CSF_TILER_OOM_EXCEPTION_FLAG)
+
+/* Initial value for LATEST_FLUSH register */
+#define POWER_DOWN_LATEST_FLUSH_VALUE ((__u32)1)
+
 /**
  * enum base_kcpu_command_type - Kernel CPU queue command type.
  * @BASE_KCPU_COMMAND_TYPE_FENCE_SIGNAL:       fence_signal,
@@ -328,7 +117,7 @@ typedef __u32 base_context_create_flags;
  * @BASE_KCPU_COMMAND_TYPE_JIT_ALLOC:          jit_alloc,
  * @BASE_KCPU_COMMAND_TYPE_JIT_FREE:           jit_free,
  * @BASE_KCPU_COMMAND_TYPE_GROUP_SUSPEND:      group_suspend,
- * @BASE_KCPU_COMMAND_TYPE_ERROR_BARRIER:      error_barrier,
+ * @BASE_KCPU_COMMAND_TYPE_ERROR_BARRIER:      error_barrier
  */
 enum base_kcpu_command_type {
 	BASE_KCPU_COMMAND_TYPE_FENCE_SIGNAL,
@@ -344,42 +133,10 @@ enum base_kcpu_command_type {
 	BASE_KCPU_COMMAND_TYPE_JIT_FREE,
 	BASE_KCPU_COMMAND_TYPE_GROUP_SUSPEND,
 	BASE_KCPU_COMMAND_TYPE_ERROR_BARRIER,
-	BASE_KCPU_COMMAND_TYPE_SAMPLE_TIME,
-	BASE_KCPU_COMMAND_TYPE_COUNT,
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+	BASE_KCPU_COMMAND_TYPE_COUNT
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
 };
-#else
-/**
- * enum base_kcpu_command_type - Kernel CPU queue command type.
- * @BASE_KCPU_COMMAND_TYPE_FENCE_SIGNAL:       fence_signal,
- * @BASE_KCPU_COMMAND_TYPE_FENCE_WAIT:         fence_wait,
- * @BASE_KCPU_COMMAND_TYPE_CQS_WAIT:           cqs_wait,
- * @BASE_KCPU_COMMAND_TYPE_CQS_SET:            cqs_set,
- * @BASE_KCPU_COMMAND_TYPE_CQS_WAIT_OPERATION: cqs_wait_operation,
- * @BASE_KCPU_COMMAND_TYPE_CQS_SET_OPERATION:  cqs_set_operation,
- * @BASE_KCPU_COMMAND_TYPE_MAP_IMPORT:         map_import,
- * @BASE_KCPU_COMMAND_TYPE_UNMAP_IMPORT:       unmap_import,
- * @BASE_KCPU_COMMAND_TYPE_UNMAP_IMPORT_FORCE: unmap_import_force,
- * @BASE_KCPU_COMMAND_TYPE_JIT_ALLOC:          jit_alloc,
- * @BASE_KCPU_COMMAND_TYPE_JIT_FREE:           jit_free,
- * @BASE_KCPU_COMMAND_TYPE_GROUP_SUSPEND:      group_suspend,
- * @BASE_KCPU_COMMAND_TYPE_ERROR_BARRIER:      error_barrier,
- */
-enum base_kcpu_command_type {
-	BASE_KCPU_COMMAND_TYPE_FENCE_SIGNAL,
-	BASE_KCPU_COMMAND_TYPE_FENCE_WAIT,
-	BASE_KCPU_COMMAND_TYPE_CQS_WAIT,
-	BASE_KCPU_COMMAND_TYPE_CQS_SET,
-	BASE_KCPU_COMMAND_TYPE_CQS_WAIT_OPERATION,
-	BASE_KCPU_COMMAND_TYPE_CQS_SET_OPERATION,
-	BASE_KCPU_COMMAND_TYPE_MAP_IMPORT,
-	BASE_KCPU_COMMAND_TYPE_UNMAP_IMPORT,
-	BASE_KCPU_COMMAND_TYPE_UNMAP_IMPORT_FORCE,
-	BASE_KCPU_COMMAND_TYPE_JIT_ALLOC,
-	BASE_KCPU_COMMAND_TYPE_JIT_FREE,
-	BASE_KCPU_COMMAND_TYPE_GROUP_SUSPEND,
-	BASE_KCPU_COMMAND_TYPE_ERROR_BARRIER,
-};
-#endif /* MALI_UNIT_TEST */
 
 /**
  * enum base_queue_group_priority - Priority of a GPU Command Queue Group.
@@ -581,11 +338,6 @@ struct base_kcpu_command_group_suspend_info {
 	__u8 padding[3];
 };
 
-#if MALI_UNIT_TEST
-struct base_kcpu_command_sample_time_info {
-	__u64 time;
-};
-#endif /* MALI_UNIT_TEST */
 
 /**
  * struct base_kcpu_command - kcpu command.
@@ -593,15 +345,17 @@ struct base_kcpu_command_sample_time_info {
  * @padding:	padding to a multiple of 64 bits
  * @info:	structure which contains information about the kcpu command;
  *		actual type is determined by @p type
- * @info.fence:            Fence
- * @info.cqs_wait:         CQS wait
- * @info.cqs_set:          CQS set
- * @info.import:           import
- * @info.jit_alloc:        jit allocation
- * @info.jit_free:         jit deallocation
- * @info.suspend_buf_copy: suspend buffer copy
- * @info.sample_time:      sample time
- * @info.padding:          padding
+ * @info.fence:              Fence
+ * @info.cqs_wait:           CQS wait
+ * @info.cqs_set:            CQS set
+ * @info.cqs_wait_operation: CQS wait operation
+ * @info.cqs_set_operation:  CQS set operation
+ * @info.import:             import
+ * @info.jit_alloc:          JIT allocation
+ * @info.jit_free:           JIT deallocation
+ * @info.suspend_buf_copy:   suspend buffer copy
+ * @info.sample_time:        sample time
+ * @info.padding:            padding
  */
 struct base_kcpu_command {
 	__u8 type;
@@ -616,9 +370,6 @@ struct base_kcpu_command {
 		struct base_kcpu_command_jit_alloc_info jit_alloc;
 		struct base_kcpu_command_jit_free_info jit_free;
 		struct base_kcpu_command_group_suspend_info suspend_buf_copy;
-#if MALI_UNIT_TEST
-		struct base_kcpu_command_sample_time_info sample_time;
-#endif /* MALI_UNIT_TEST */
 		__u64 padding[2]; /* No sub-struct should be larger */
 	} info;
 };
@@ -663,7 +414,7 @@ struct basep_cs_group_control {
 struct base_gpu_queue_group_error_fatal_payload {
 	__u64 sideband;
 	__u32 status;
-	__u32 padding;
+	__u8 padding[20];
 };
 
 /**
@@ -682,11 +433,50 @@ struct base_gpu_queue_error_fatal_payload {
 	__u64 sideband;
 	__u32 status;
 	__u8 csi_index;
-	__u8 padding[3];
+	__u8 padding[6];
+	/**
+	 * @has_extra: Set to 0x1 (true) when the extra trace data is filled,
+	 * otherwise 0 (false)
+	 */
+	__u8 has_extra;
+	/** @trace_id0: The extra EXCEPTION_TRACE_ID0 value */
+	__u32 trace_id0;
+	/** @trace_id1: The extra EXCEPTION_TRACE_ID1 value */
+	__u32 trace_id1;
+	/** @trace_task: The extra EXCEPTION_TRACE_TASK value */
+	__u32 trace_task;
 };
 
 /**
- * enum base_gpu_queue_group_error_type - GPU Fatal error type.
+ * struct base_gpu_queue_error_fault_payload - Recoverable fault
+ *        error information related to GPU command queue.
+ *
+ * @sideband:     Additional information about this recoverable fault.
+ * @status:       Recoverable fault information.
+ *                This consists of exception type (least significant byte) and
+ *                data (remaining bytes). One example of exception type is
+ *                INSTR_INVALID_PC (0x50).
+ * @csi_index:    Index of the CSF interface the queue is bound to.
+ * @padding:      Padding to make multiple of 64bits
+ * @has_extra:    Set to 0x1 (true) when the extra trace data is filled,
+ *                otherwise 0 (false)
+ * @trace_id0:    The extra EXCEPTION_TRACE_ID0 value.
+ * @trace_id1:    The extra EXCEPTION_TRACE_ID1 value.
+ * @trace_task:   The extra EXCEPTION_TRACE_TASK value.
+ */
+struct base_gpu_queue_error_fault_payload {
+	__u64 sideband;
+	__u32 status;
+	__u8 csi_index;
+	__u8 padding[6];
+	__u8 has_extra;
+	__u32 trace_id0;
+	__u32 trace_id1;
+	__u32 trace_task;
+};
+
+/**
+ * enum base_gpu_queue_group_error_type - GPU error type.
  *
  * @BASE_GPU_QUEUE_GROUP_ERROR_FATAL:       Fatal error associated with GPU
  *                                          command queue group.
@@ -696,7 +486,9 @@ struct base_gpu_queue_error_fatal_payload {
  *                                          progress timeout.
  * @BASE_GPU_QUEUE_GROUP_ERROR_TILER_HEAP_OOM: Fatal error due to running out
  *                                             of tiler heap memory.
- * @BASE_GPU_QUEUE_GROUP_ERROR_FATAL_COUNT: The number of fatal error types
+ * @BASE_GPU_QUEUE_GROUP_QUEUE_ERROR_FAULT: Fault error associated with GPU
+ *                                          command queue.
+ * @BASE_GPU_QUEUE_GROUP_ERROR_FATAL_COUNT: The number of GPU error types
  *
  * This type is used for &struct_base_gpu_queue_group_error.error_type.
  */
@@ -705,6 +497,10 @@ enum base_gpu_queue_group_error_type {
 	BASE_GPU_QUEUE_GROUP_QUEUE_ERROR_FATAL,
 	BASE_GPU_QUEUE_GROUP_ERROR_TIMEOUT,
 	BASE_GPU_QUEUE_GROUP_ERROR_TILER_HEAP_OOM,
+	BASE_GPU_QUEUE_GROUP_QUEUE_ERROR_FAULT,
+#if IS_ENABLED(CONFIG_MALI_MTK_HWCNT_HINT)
+	BASE_NOTIFICATION_HWCNT,
+#endif /* CONFIG_MALI_MTK_HWCNT_HINT */
 	BASE_GPU_QUEUE_GROUP_ERROR_FATAL_COUNT
 };
 
@@ -724,6 +520,7 @@ struct base_gpu_queue_group_error {
 	union {
 		struct base_gpu_queue_group_error_fatal_payload fatal_group;
 		struct base_gpu_queue_error_fatal_payload fatal_queue;
+		struct base_gpu_queue_error_fault_payload fault_queue;
 	} payload;
 };
 
@@ -731,10 +528,10 @@ struct base_gpu_queue_group_error {
  * enum base_csf_notification_type - Notification type
  *
  * @BASE_CSF_NOTIFICATION_EVENT:                 Notification with kernel event
- * @BASE_CSF_NOTIFICATION_GPU_QUEUE_GROUP_ERROR: Notification with GPU fatal
- *                                               error
+ * @BASE_CSF_NOTIFICATION_GPU_QUEUE_GROUP_ERROR: Notification with GPU error
  * @BASE_CSF_NOTIFICATION_CPU_QUEUE_DUMP:        Notification with dumping cpu
  *                                               queue
+ * @BASE_CSF_NOTIFICATION_HWCNT:                 Notification with hwcnt start info
  * @BASE_CSF_NOTIFICATION_COUNT:                 The number of notification type
  *
  * This type is used for &struct_base_csf_notification.type.
@@ -743,8 +540,28 @@ enum base_csf_notification_type {
 	BASE_CSF_NOTIFICATION_EVENT = 0,
 	BASE_CSF_NOTIFICATION_GPU_QUEUE_GROUP_ERROR,
 	BASE_CSF_NOTIFICATION_CPU_QUEUE_DUMP,
+#if IS_ENABLED(CONFIG_MALI_MTK_HWCNT_HINT)
+	BASE_CSF_NOTIFICATION_HWCNT,
+#endif /* CONFIG_MALI_MTK_HWCNT_HINT */
 	BASE_CSF_NOTIFICATION_COUNT
 };
+
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+/**
+ * enum mtk_base_csf_notification_dump_cmd - Dump command
+ *
+ * @MTK_BASE_CSF_CPU_QUEUE_DUMP:                 Dump CPU Queues
+ * @MTK_BASE_CSF_CPU_QUEUE_DUMP_RAW:             Dump raw CPU Queues
+ * @MTK_BASE_CSF_CPU_QUEUE_DUMP_COUNT:           The number of dump command
+ *
+ * This type is used for &struct_base_csf_notification.payload.dump.cmd.
+ */
+enum mtk_base_csf_notification_dump_cmd {
+	MTK_BASE_CSF_CPU_QUEUE_DUMP = 0,
+	MTK_BASE_CSF_CPU_QUEUE_DUMP_RAW,
+	MTK_BASE_CSF_CPU_QUEUE_DUMP_COUNT
+};
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
 
 /**
  * struct base_csf_notification - Event or error notification
@@ -769,9 +586,56 @@ struct base_csf_notification {
 			__u8 padding[7];
 			struct base_gpu_queue_group_error error;
 		} csg_error;
-
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+		struct {
+			__u8 cmd;
+		} dump;
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
 		__u8 align[56];
 	} payload;
+};
+
+/**
+ * struct mali_base_gpu_core_props - GPU core props info
+ *
+ * @product_id: Pro specific value.
+ * @version_status: Status of the GPU release. No defined values, but starts at
+ *   0 and increases by one for each release status (alpha, beta, EAC, etc.).
+ *   4 bit values (0-15).
+ * @minor_revision: Minor release number of the GPU. "P" part of an "RnPn"
+ *   release number.
+ *   8 bit values (0-255).
+ * @major_revision: Major release number of the GPU. "R" part of an "RnPn"
+ *   release number.
+ *   4 bit values (0-15).
+ * @padding: padding to align to 8-byte
+ * @gpu_freq_khz_max: The maximum GPU frequency. Reported to applications by
+ *   clGetDeviceInfo()
+ * @log2_program_counter_size: Size of the shader program counter, in bits.
+ * @texture_features: TEXTURE_FEATURES_x registers, as exposed by the GPU. This
+ *   is a bitpattern where a set bit indicates that the format is supported.
+ *   Before using a texture format, it is recommended that the corresponding
+ *   bit be checked.
+ * @paddings: Padding bytes.
+ * @gpu_available_memory_size: Theoretical maximum memory available to the GPU.
+ *   It is unlikely that a client will be able to allocate all of this memory
+ *   for their own purposes, but this at least provides an upper bound on the
+ *   memory available to the GPU.
+ *   This is required for OpenCL's clGetDeviceInfo() call when
+ *   CL_DEVICE_GLOBAL_MEM_SIZE is requested, for OpenCL GPU devices. The
+ *   client will not be expecting to allocate anywhere near this value.
+ */
+struct mali_base_gpu_core_props {
+	__u32 product_id;
+	__u16 version_status;
+	__u16 minor_revision;
+	__u16 major_revision;
+	__u16 padding;
+	__u32 gpu_freq_khz_max;
+	__u32 log2_program_counter_size;
+	__u32 texture_features[BASE_GPU_NUM_TEXTURE_FEATURES_REGISTERS];
+	__u8 paddings[4];
+	__u64 gpu_available_memory_size;
 };
 
 #endif /* _UAPI_BASE_CSF_KERNEL_H_ */

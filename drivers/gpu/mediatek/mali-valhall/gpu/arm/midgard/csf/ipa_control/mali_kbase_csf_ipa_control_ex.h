@@ -22,3 +22,4 @@ extern int (*mtk_common_rate_change_notify_fp)(struct kbase_device *kbdev,
 					       u32 clk_index, u32 clk_rate_hz);
 
 #endif /* _KBASE_CSF_IPA_CONTROL_EX_H */
+

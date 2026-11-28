@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2014-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2014-2025 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -29,15 +29,13 @@
 #if IS_ENABLED(CONFIG_DEVFREQ_THERMAL)
 #include <linux/devfreq_cooling.h>
 #endif
+#include <linux/pm_domain.h>
 
 #include <linux/version.h>
 #include <linux/pm_opp.h>
-#if IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ)
-#include <platform/mtk_platform_common/mtk_gpu_devfreq_governor.h>
-#endif
-#if IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ_THERMAL)
-#include <platform/mtk_platform_common/mtk_gpu_devfreq_thermal.h>
-#endif
+#include "mali_kbase_devfreq.h"
+#include <platform/mtk_platform_utils.h> /* MTK_INLINE */
+#include <mtk_ddk_define.h>  /* MTK_INLINE */
 
 /**
  * get_voltage() - Get the voltage value corresponding to the nominal frequency
@@ -48,7 +46,7 @@
  * This function will be called only when the opp table which is compatible with
  * "operating-points-v2-mali", is not present in the devicetree for GPU device.
  *
- * Return: Voltage value in milli volts, 0 in case of error.
+ * Return: Voltage value in micro volts, 0 in case of error.
  */
 static unsigned long get_voltage(struct kbase_device *kbdev, unsigned long freq)
 {
@@ -62,7 +60,7 @@ static unsigned long get_voltage(struct kbase_device *kbdev, unsigned long freq)
 	opp = dev_pm_opp_find_freq_exact(kbdev->dev, freq, true);
 
 	if (IS_ERR_OR_NULL(opp))
-		dev_err(kbdev->dev, "Failed to get opp (%ld)\n", PTR_ERR(opp));
+		dev_err(kbdev->dev, "Failed to get opp (%d)\n", PTR_ERR_OR_ZERO(opp));
 	else {
 		voltage = dev_pm_opp_get_voltage(opp);
 #if KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE
@@ -74,12 +72,12 @@ static unsigned long get_voltage(struct kbase_device *kbdev, unsigned long freq)
 	rcu_read_unlock();
 #endif
 
-	/* Return the voltage in milli volts */
-	return voltage / 1000;
+	/* Return the voltage in micro volts */
+	return voltage;
 }
 
-void kbase_devfreq_opp_translate(struct kbase_device *kbdev, unsigned long freq,
-	u64 *core_mask, unsigned long *freqs, unsigned long *volts)
+void kbase_devfreq_opp_translate(struct kbase_device *kbdev, unsigned long freq, u64 *core_mask,
+				 unsigned long *freqs, unsigned long *volts)
 {
 	unsigned int i;
 
@@ -89,10 +87,8 @@ void kbase_devfreq_opp_translate(struct kbase_device *kbdev, unsigned long freq,
 
 			*core_mask = kbdev->devfreq_table[i].core_mask;
 			for (j = 0; j < kbdev->nr_clocks; j++) {
-				freqs[j] =
-					kbdev->devfreq_table[i].real_freqs[j];
-				volts[j] =
-					kbdev->devfreq_table[i].opp_volts[j];
+				freqs[j] = kbdev->devfreq_table[i].real_freqs[j];
+				volts[j] = kbdev->devfreq_table[i].opp_volts[j];
 			}
 
 			break;
@@ -105,7 +101,7 @@ void kbase_devfreq_opp_translate(struct kbase_device *kbdev, unsigned long freq,
 	if (i == kbdev->num_opps) {
 		unsigned long voltage = get_voltage(kbdev, freq);
 
-		*core_mask = kbdev->gpu_props.props.raw_props.shader_present;
+		*core_mask = kbdev->gpu_props.shader_present;
 
 		for (i = 0; i < kbdev->nr_clocks; i++) {
 			freqs[i] = freq;
@@ -114,15 +110,18 @@ void kbase_devfreq_opp_translate(struct kbase_device *kbdev, unsigned long freq,
 	}
 }
 
-static int
-kbase_devfreq_target(struct device *dev, unsigned long *target_freq, u32 flags)
+static int kbase_devfreq_target(struct device *dev, unsigned long *target_freq, u32 flags)
 {
 	struct kbase_device *kbdev = dev_get_drvdata(dev);
 	struct dev_pm_opp *opp;
 	unsigned long nominal_freq;
-	unsigned long freqs[BASE_MAX_NR_CLOCKS_REGULATORS] = {0};
-	unsigned long volts[BASE_MAX_NR_CLOCKS_REGULATORS] = {0};
+	unsigned long freqs[BASE_MAX_NR_CLOCKS_REGULATORS] = { 0 };
+#if IS_ENABLED(CONFIG_REGULATOR)
+	unsigned long original_freqs[BASE_MAX_NR_CLOCKS_REGULATORS] = { 0 };
+#endif
+	unsigned long volts[BASE_MAX_NR_CLOCKS_REGULATORS] = { 0 };
 	unsigned int i;
+	int err;
 	u64 core_mask;
 
 	nominal_freq = *target_freq;
@@ -135,13 +134,20 @@ kbase_devfreq_target(struct device *dev, unsigned long *target_freq, u32 flags)
 	rcu_read_unlock();
 #endif
 	if (IS_ERR_OR_NULL(opp)) {
-		dev_err(dev, "Failed to get opp (%ld)\n", PTR_ERR(opp));
-		return PTR_ERR(opp);
+		dev_err(dev, "Failed to get opp (%d)\n", PTR_ERR_OR_ZERO(opp));
+		return IS_ERR(opp) ? PTR_ERR(opp) : -ENODEV;
 	}
 #if KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE
 	dev_pm_opp_put(opp);
 #endif
-
+#if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+	err = dev_pm_genpd_set_performance_state(kbdev->dev, nominal_freq);
+	/* For ENODEV or EOPNOTSUPP do not return error code */
+	if (err && !((err == -ENODEV) || (err == -EOPNOTSUPP))) {
+		dev_err(dev, "Failed to set opp (%d) (target %lu)\n", err, *target_freq);
+		return err;
+	}
+#endif
 	/*
 	 * Only update if there is a change of frequency
 	 */
@@ -150,36 +156,32 @@ kbase_devfreq_target(struct device *dev, unsigned long *target_freq, u32 flags)
 		return 0;
 	}
 
-	kbase_devfreq_opp_translate(kbdev, nominal_freq, &core_mask,
-				    freqs, volts);
+	kbase_devfreq_opp_translate(kbdev, nominal_freq, &core_mask, freqs, volts);
 
 #if IS_ENABLED(CONFIG_REGULATOR)
 	/* Regulators and clocks work in pairs: every clock has a regulator,
 	 * and we never expect to have more regulators than clocks.
 	 *
-	 * We always need to increase the voltage before increasing
-	 * the frequency of a regulator/clock pair, otherwise the clock
-	 * wouldn't have enough power to perform the transition.
+	 * We always need to increase the voltage before increasing the number
+	 * of shader cores and the frequency of a regulator/clock pair,
+	 * otherwise the clock wouldn't have enough power to perform
+	 * the transition.
 	 *
-	 * It's always safer to decrease the frequency before decreasing
-	 * voltage of a regulator/clock pair, otherwise the clock could have
-	 * problems operating if it is deprived of the necessary power
-	 * to sustain its current frequency (even if that happens for a short
-	 * transition interval).
+	 * It's always safer to decrease the number of shader cores and
+	 * the frequency before decreasing voltage of a regulator/clock pair,
+	 * otherwise the clock could have problematic operation if it is
+	 * deprived of the necessary power to sustain its current frequency
+	 * (even if that happens for a short transition interval).
 	 */
 	for (i = 0; i < kbdev->nr_clocks; i++) {
-		if (kbdev->regulators[i] &&
-				kbdev->current_voltages[i] != volts[i] &&
-				kbdev->current_freqs[i] < freqs[i]) {
-			int err;
-
-			err = regulator_set_voltage(kbdev->regulators[i],
-				volts[i], volts[i]);
+		if (kbdev->regulators[i] && kbdev->current_voltages[i] != volts[i] &&
+		    kbdev->current_freqs[i] < freqs[i]) {
+			err = regulator_set_voltage(kbdev->regulators[i], volts[i], volts[i]);
 			if (!err) {
 				kbdev->current_voltages[i] = volts[i];
 			} else {
-				dev_err(dev, "Failed to increase voltage (%d) (target %lu)\n",
-					err, volts[i]);
+				dev_err(dev, "Failed to increase voltage (%d) (target %lu)\n", err,
+					volts[i]);
 				return err;
 			}
 		}
@@ -188,40 +190,37 @@ kbase_devfreq_target(struct device *dev, unsigned long *target_freq, u32 flags)
 
 	for (i = 0; i < kbdev->nr_clocks; i++) {
 		if (kbdev->clocks[i]) {
-			int err;
-
 			err = clk_set_rate(kbdev->clocks[i], freqs[i]);
 			if (!err) {
+#if IS_ENABLED(CONFIG_REGULATOR)
+				original_freqs[i] = kbdev->current_freqs[i];
+#endif
 				kbdev->current_freqs[i] = freqs[i];
 			} else {
-				dev_err(dev, "Failed to set clock %lu (target %lu)\n",
-					freqs[i], *target_freq);
+				dev_err(dev, "Failed to set clock %lu (target %lu)\n", freqs[i],
+					*target_freq);
 				return err;
 			}
 		}
 	}
 
+	kbase_devfreq_set_core_mask(kbdev, core_mask);
+
 #if IS_ENABLED(CONFIG_REGULATOR)
 	for (i = 0; i < kbdev->nr_clocks; i++) {
-		if (kbdev->regulators[i] &&
-				kbdev->current_voltages[i] != volts[i] &&
-				kbdev->current_freqs[i] > freqs[i]) {
-			int err;
-
-			err = regulator_set_voltage(kbdev->regulators[i],
-				volts[i], volts[i]);
+		if (kbdev->regulators[i] && kbdev->current_voltages[i] != volts[i] &&
+		    original_freqs[i] > freqs[i]) {
+			err = regulator_set_voltage(kbdev->regulators[i], volts[i], volts[i]);
 			if (!err) {
 				kbdev->current_voltages[i] = volts[i];
 			} else {
-				dev_err(dev, "Failed to decrease voltage (%d) (target %lu)\n",
-					err, volts[i]);
+				dev_err(dev, "Failed to decrease voltage (%d) (target %lu)\n", err,
+					volts[i]);
 				return err;
 			}
 		}
 	}
 #endif
-
-	kbase_devfreq_set_core_mask(kbdev, core_mask);
 
 	*target_freq = nominal_freq;
 	kbdev->current_nominal_freq = nominal_freq;
@@ -239,8 +238,7 @@ void kbase_devfreq_force_freq(struct kbase_device *kbdev, unsigned long freq)
 	kbase_devfreq_target(kbdev->dev, &target_freq, 0);
 }
 
-static int
-kbase_devfreq_cur_freq(struct device *dev, unsigned long *freq)
+static int kbase_devfreq_cur_freq(struct device *dev, unsigned long *freq)
 {
 	struct kbase_device *kbdev = dev_get_drvdata(dev);
 
@@ -249,15 +247,13 @@ kbase_devfreq_cur_freq(struct device *dev, unsigned long *freq)
 	return 0;
 }
 
-static int
-kbase_devfreq_status(struct device *dev, struct devfreq_dev_status *stat)
+static int kbase_devfreq_status(struct device *dev, struct devfreq_dev_status *stat)
 {
 	struct kbase_device *kbdev = dev_get_drvdata(dev);
 	struct kbasep_pm_metrics diff;
 
 	kbase_pm_get_dvfs_metrics(kbdev, &kbdev->last_devfreq_metrics, &diff);
 
-#if MALI_USE_CSF
 #if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
 	IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
 	stat->busy_time = diff.time_busy[0];
@@ -265,26 +261,21 @@ kbase_devfreq_status(struct device *dev, struct devfreq_dev_status *stat)
 #else
 	stat->busy_time = diff.time_busy;
 	stat->total_time = diff.time_busy + diff.time_idle;
-#endif
-#else //MALI_USE_CSF
-	stat->busy_time = diff.time_busy;
-	stat->total_time = diff.time_busy + diff.time_idle;
-#endif
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY */
 	stat->current_frequency = kbdev->current_nominal_freq;
 	stat->private_data = NULL;
 
-#if MALI_USE_CSF && defined CONFIG_DEVFREQ_THERMAL
+#if defined CONFIG_DEVFREQ_THERMAL
 	kbase_ipa_reset_data(kbdev);
 #endif
 
 	return 0;
 }
 
-static int kbase_devfreq_init_freq_table(struct kbase_device *kbdev,
-		struct devfreq_dev_profile *dp)
+static int kbase_devfreq_init_freq_table(struct kbase_device *kbdev, struct devfreq_dev_profile *dp)
 {
 	int count;
-	int i = 0;
+	unsigned int i = 0;
 	unsigned long freq;
 	struct dev_pm_opp *opp;
 
@@ -298,15 +289,14 @@ static int kbase_devfreq_init_freq_table(struct kbase_device *kbdev,
 	if (count < 0)
 		return count;
 
-	dp->freq_table = kmalloc_array(count, sizeof(dp->freq_table[0]),
-				GFP_KERNEL);
+	dp->freq_table = kmalloc_array((size_t)count, sizeof(dp->freq_table[0]), GFP_KERNEL);
 	if (!dp->freq_table)
 		return -ENOMEM;
 
 #if KERNEL_VERSION(4, 11, 0) > LINUX_VERSION_CODE
 	rcu_read_lock();
 #endif
-	for (i = 0, freq = ULONG_MAX; i < count; i++, freq--) {
+	for (i = 0, freq = ULONG_MAX; i < (unsigned int)count; i++, freq--) {
 		opp = dev_pm_opp_find_freq_floor(kbdev->dev, &freq);
 		if (IS_ERR(opp))
 			break;
@@ -320,11 +310,11 @@ static int kbase_devfreq_init_freq_table(struct kbase_device *kbdev,
 	rcu_read_unlock();
 #endif
 
-	if (count != i)
-		dev_warn(kbdev->dev, "Unable to enumerate all OPPs (%d!=%d\n",
-				count, i);
+	if ((unsigned int)count != i)
+		dev_warn(kbdev->dev, "Unable to enumerate all OPPs (%d!=%u\n", count, i);
 
 	dp->max_state = i;
+
 
 	/* Have the lowest clock as suspend clock.
 	 * It may be overridden by 'opp-mali-errata-1485982'.
@@ -365,8 +355,7 @@ static void kbase_devfreq_exit(struct device *dev)
 		kbase_devfreq_term_freq_table(kbdev);
 }
 
-static void kbasep_devfreq_read_suspend_clock(struct kbase_device *kbdev,
-		struct device_node *node)
+static void kbasep_devfreq_read_suspend_clock(struct kbase_device *kbdev, struct device_node *node)
 {
 	u64 freq = 0;
 	int err = 0;
@@ -395,8 +384,7 @@ static void kbasep_devfreq_read_suspend_clock(struct kbase_device *kbdev,
 		return;
 
 	kbdev->pm.backend.gpu_clock_suspend_freq = freq;
-	dev_info(kbdev->dev,
-		"suspend clock %llu by opp-mali-errata-1485982", freq);
+	dev_info(kbdev->dev, "suspend clock %llu by opp-mali-errata-1485982", freq);
 }
 
 static int kbase_devfreq_init_core_mask_table(struct kbase_device *kbdev)
@@ -411,12 +399,12 @@ static int kbase_devfreq_init_core_mask_table(struct kbase_device *kbdev)
 	 */
 	return 0;
 #else
-	struct device_node *opp_node = of_parse_phandle(kbdev->dev->of_node,
-			"operating-points-v2", 0);
+	struct device_node *opp_node =
+		of_parse_phandle(kbdev->dev->of_node, "operating-points-v2", 0);
 	struct device_node *node;
-	int i = 0;
+	unsigned int i = 0;
 	int count;
-	u64 shader_present = kbdev->gpu_props.props.raw_props.shader_present;
+	u64 shader_present = kbdev->gpu_props.shader_present;
 
 	if (!opp_node)
 		return 0;
@@ -424,15 +412,14 @@ static int kbase_devfreq_init_core_mask_table(struct kbase_device *kbdev)
 		return 0;
 
 	count = dev_pm_opp_get_opp_count(kbdev->dev);
-	kbdev->devfreq_table = kmalloc_array(count,
-			sizeof(struct kbase_devfreq_opp), GFP_KERNEL);
+	kbdev->devfreq_table =
+		kmalloc_array((size_t)count, sizeof(struct kbase_devfreq_opp), GFP_KERNEL);
 	if (!kbdev->devfreq_table)
 		return -ENOMEM;
 
 	for_each_available_child_of_node(opp_node, node) {
 		const void *core_count_p;
-		u64 core_mask, opp_freq,
-			real_freqs[BASE_MAX_NR_CLOCKS_REGULATORS];
+		u64 core_mask, opp_freq, real_freqs[BASE_MAX_NR_CLOCKS_REGULATORS];
 		int err;
 #if IS_ENABLED(CONFIG_REGULATOR)
 		u32 opp_volts[BASE_MAX_NR_CLOCKS_REGULATORS];
@@ -444,30 +431,27 @@ static int kbase_devfreq_init_core_mask_table(struct kbase_device *kbdev)
 
 		err = of_property_read_u64(node, "opp-hz", &opp_freq);
 		if (err) {
-			dev_warn(kbdev->dev, "Failed to read opp-hz property with error %d\n",
-					err);
+			dev_warn(kbdev->dev, "Failed to read opp-hz property with error %d\n", err);
 			continue;
 		}
 
-
 #if BASE_MAX_NR_CLOCKS_REGULATORS > 1
-		err = of_property_read_u64_array(node, "opp-hz-real",
-				real_freqs, kbdev->nr_clocks);
+		err = of_property_read_u64_array(node, "opp-hz-real", real_freqs, kbdev->nr_clocks);
 #else
 		WARN_ON(kbdev->nr_clocks != 1);
 		err = of_property_read_u64(node, "opp-hz-real", real_freqs);
 #endif
 		if (err < 0) {
-			dev_warn(kbdev->dev, "Failed to read opp-hz-real property with error %d\n",
-					err);
+			dev_warn(kbdev->dev, "Failed to read opp-hz-real property with error %d",
+				 err);
 			continue;
 		}
 #if IS_ENABLED(CONFIG_REGULATOR)
-		err = of_property_read_u32_array(node,
-			"opp-microvolt", opp_volts, kbdev->nr_regulators);
+		err = of_property_read_u32_array(node, "opp-microvolt", opp_volts,
+						 kbdev->nr_regulators);
 		if (err < 0) {
-			dev_warn(kbdev->dev, "Failed to read opp-microvolt property with error %d\n",
-					err);
+			dev_warn(kbdev->dev, "Failed to read opp-microvolt property with error %d",
+				 err);
 			continue;
 		}
 #endif
@@ -475,16 +459,39 @@ static int kbase_devfreq_init_core_mask_table(struct kbase_device *kbdev)
 		if (of_property_read_u64(node, "opp-core-mask", &core_mask))
 			core_mask = shader_present;
 		if (core_mask != shader_present && corestack_driver_control) {
-
-			dev_warn(kbdev->dev, "Ignoring OPP %llu - Dynamic Core Scaling not supported on this GPU\n",
-					opp_freq);
+			dev_warn(
+				kbdev->dev,
+				"Ignoring OPP %llu - Dynamic Core Scaling not supported on this GPU",
+				opp_freq);
 			continue;
+		}
+		if (kbase_csf_dev_has_ne(kbdev)) {
+			u64 neural_present = kbdev->gpu_props.neural_present;
+			u64 sc_with_ne = shader_present & neural_present;
+
+			if (!sc_with_ne) {
+				dev_err(kbdev->dev,
+					"No shader cores with NE cores present in configuration with NE!");
+				continue;
+			}
+
+			if ((neural_present & shader_present) != neural_present) {
+				dev_err(kbdev->dev,
+					"Detected NE core without a corresponding shader core: NEURAL_PRESENT %llx SHADER_PRESENT %llx",
+					neural_present, shader_present);
+			}
+
+			if (!(core_mask & sc_with_ne)) {
+				dev_err(kbdev->dev,
+					"Ignoring OPP %d - No shader cores with NE cores present in the given core mask %llx",
+					i, core_mask);
+				continue;
+			}
 		}
 
 		core_count_p = of_get_property(node, "opp-core-count", NULL);
 		if (core_count_p) {
-			u64 remaining_core_mask =
-				kbdev->gpu_props.props.raw_props.shader_present;
+			u64 remaining_core_mask = kbdev->gpu_props.shader_present;
 			int core_count = be32_to_cpup(core_count_p);
 
 			core_mask = 0;
@@ -497,8 +504,8 @@ static int kbase_devfreq_init_core_mask_table(struct kbase_device *kbdev)
 					return -ENODEV;
 				}
 
-				core_mask |= (1ull << (core-1));
-				remaining_core_mask &= ~(1ull << (core-1));
+				core_mask |= (1ull << (core - 1));
+				remaining_core_mask &= ~(1ull << (core - 1));
 			}
 		}
 
@@ -510,24 +517,22 @@ static int kbase_devfreq_init_core_mask_table(struct kbase_device *kbdev)
 		kbdev->devfreq_table[i].opp_freq = opp_freq;
 		kbdev->devfreq_table[i].core_mask = core_mask;
 		if (kbdev->nr_clocks > 0) {
-			int j;
+			unsigned int j;
 
 			for (j = 0; j < kbdev->nr_clocks; j++)
-				kbdev->devfreq_table[i].real_freqs[j] =
-					real_freqs[j];
+				kbdev->devfreq_table[i].real_freqs[j] = real_freqs[j];
 		}
 #if IS_ENABLED(CONFIG_REGULATOR)
 		if (kbdev->nr_regulators > 0) {
-			int j;
+			unsigned int j;
 
 			for (j = 0; j < kbdev->nr_regulators; j++)
-				kbdev->devfreq_table[i].opp_volts[j] =
-						opp_volts[j];
+				kbdev->devfreq_table[i].opp_volts[j] = opp_volts[j];
 		}
 #endif
 
-		dev_info(kbdev->dev, "OPP %d : opp_freq=%llu core_mask=%llx\n",
-				i, opp_freq, core_mask);
+		dev_info(kbdev->dev, "OPP %d : opp_freq=%llu core_mask=%llx\n", i, opp_freq,
+			 core_mask);
 
 		i++;
 	}
@@ -560,10 +565,9 @@ static const char *kbase_devfreq_req_type_name(enum kbase_devfreq_work_type type
 
 static void kbase_devfreq_suspend_resume_worker(struct work_struct *work)
 {
-	struct kbase_devfreq_queue_info *info = container_of(work,
-			struct kbase_devfreq_queue_info, work);
-	struct kbase_device *kbdev = container_of(info, struct kbase_device,
-			devfreq_queue);
+	struct kbase_devfreq_queue_info *info =
+		container_of(work, struct kbase_devfreq_queue_info, work);
+	struct kbase_device *kbdev = container_of(info, struct kbase_device, devfreq_queue);
 	unsigned long flags;
 	enum kbase_devfreq_work_type type, acted_type;
 
@@ -572,9 +576,8 @@ static void kbase_devfreq_suspend_resume_worker(struct work_struct *work)
 	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
 
 	acted_type = kbdev->devfreq_queue.acted_type;
-	dev_vdbg(kbdev->dev, "Worker handles queued req: %s (acted: %s)\n",
-		kbase_devfreq_req_type_name(type),
-		kbase_devfreq_req_type_name(acted_type));
+	dev_dbg(kbdev->dev, "Worker handles queued req: %s (acted: %s)\n",
+		kbase_devfreq_req_type_name(type), kbase_devfreq_req_type_name(acted_type));
 	switch (type) {
 	case DEVFREQ_WORK_SUSPEND:
 	case DEVFREQ_WORK_RESUME:
@@ -583,7 +586,7 @@ static void kbase_devfreq_suspend_resume_worker(struct work_struct *work)
 				devfreq_resume_device(kbdev->devfreq);
 			else
 				devfreq_suspend_device(kbdev->devfreq);
-			dev_vdbg(kbdev->dev, "Devfreq transition occured: %s => %s\n",
+			dev_dbg(kbdev->dev, "Devfreq transition occured: %s => %s\n",
 				kbase_devfreq_req_type_name(acted_type),
 				kbase_devfreq_req_type_name(type));
 			kbdev->devfreq_queue.acted_type = type;
@@ -594,8 +597,7 @@ static void kbase_devfreq_suspend_resume_worker(struct work_struct *work)
 	}
 }
 
-void kbase_devfreq_enqueue_work(struct kbase_device *kbdev,
-				       enum kbase_devfreq_work_type work_type)
+void kbase_devfreq_enqueue_work(struct kbase_device *kbdev, enum kbase_devfreq_work_type work_type)
 {
 	unsigned long flags;
 
@@ -604,12 +606,10 @@ void kbase_devfreq_enqueue_work(struct kbase_device *kbdev,
 	/* Skip enqueuing a work if workqueue has already been terminated. */
 	if (likely(kbdev->devfreq_queue.workq)) {
 		kbdev->devfreq_queue.req_type = work_type;
-		queue_work(kbdev->devfreq_queue.workq,
-			   &kbdev->devfreq_queue.work);
+		queue_work(kbdev->devfreq_queue.workq, &kbdev->devfreq_queue.work);
 	}
 	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
-	dev_vdbg(kbdev->dev, "Enqueuing devfreq req: %s\n",
-		kbase_devfreq_req_type_name(work_type));
+	dev_dbg(kbdev->dev, "Enqueuing devfreq req: %s\n", kbase_devfreq_req_type_name(work_type));
 }
 
 static int kbase_devfreq_work_init(struct kbase_device *kbdev)
@@ -621,8 +621,7 @@ static int kbase_devfreq_work_init(struct kbase_device *kbdev)
 	if (!kbdev->devfreq_queue.workq)
 		return -ENOMEM;
 
-	INIT_WORK(&kbdev->devfreq_queue.work,
-			kbase_devfreq_suspend_resume_worker);
+	INIT_WORK(&kbdev->devfreq_queue.work, kbase_devfreq_suspend_resume_worker);
 	return 0;
 }
 
@@ -639,13 +638,12 @@ static void kbase_devfreq_work_term(struct kbase_device *kbdev)
 	destroy_workqueue(workq);
 }
 
-
 int kbase_devfreq_init(struct kbase_device *kbdev)
 {
 	struct devfreq_dev_profile *dp;
 	int err;
-#if !IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ)
 	unsigned int i;
+	bool free_devfreq_freq_table = true;
 
 	if (kbdev->nr_clocks == 0) {
 		dev_err(kbdev->dev, "Clock not available for devfreq\n");
@@ -654,13 +652,9 @@ int kbase_devfreq_init(struct kbase_device *kbdev)
 
 	for (i = 0; i < kbdev->nr_clocks; i++) {
 		if (kbdev->clocks[i])
-			kbdev->current_freqs[i] =
-				clk_get_rate(kbdev->clocks[i]);
-		else
-			kbdev->current_freqs[i] = 0;
+			kbdev->current_freqs[i] = clk_get_rate(kbdev->clocks[i]);
 	}
 	kbdev->current_nominal_freq = kbdev->current_freqs[0];
-#endif
 
 	dp = &kbdev->devfreq_profile;
 
@@ -676,44 +670,37 @@ int kbase_devfreq_init(struct kbase_device *kbdev)
 
 	if (dp->max_state > 0) {
 		/* Record the maximum frequency possible */
-		kbdev->gpu_props.props.core_props.gpu_freq_khz_max =
-			dp->freq_table[0] / 1000;
+		kbdev->gpu_props.gpu_freq_khz_max = dp->freq_table[0] / 1000;
 	}
+
+#if IS_ENABLED(CONFIG_DEVFREQ_THERMAL)
+	err = kbase_ipa_init(kbdev);
+	if (err) {
+		dev_err(kbdev->dev, "IPA initialization failed");
+		goto ipa_init_failed;
+	}
+#endif
 
 	err = kbase_devfreq_init_core_mask_table(kbdev);
-	if (err) {
-		kbase_devfreq_term_freq_table(kbdev);
-		return err;
-	}
+	if (err)
+		goto init_core_mask_table_failed;
 
-#if IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ)
-	mtk_common_devfreq_update_profile(dp);
-#endif
-
-	kbdev->devfreq = devfreq_add_device(kbdev->dev, dp,
-#if IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ)
-				MTK_GPU_DEVFREQ_GOV_DUMMY, NULL);
-#else
-				"simple_ondemand", NULL);
-#endif
+	kbdev->devfreq = devfreq_add_device(kbdev->dev, dp, "simple_ondemand", NULL);
 	if (IS_ERR(kbdev->devfreq)) {
 		err = PTR_ERR(kbdev->devfreq);
 		kbdev->devfreq = NULL;
-		kbase_devfreq_term_core_mask_table(kbdev);
-		kbase_devfreq_term_freq_table(kbdev);
-		dev_err(kbdev->dev, "Fail to add devfreq device(%d)\n", err);
-		return err;
+		dev_err(kbdev->dev, "Fail to add devfreq device(%d)", err);
+		goto devfreq_add_dev_failed;
 	}
+
+	/* Explicit free of freq table isn't needed after devfreq_add_device() */
+	free_devfreq_freq_table = false;
 
 	/* Initialize devfreq suspend/resume workqueue */
 	err = kbase_devfreq_work_init(kbdev);
 	if (err) {
-		if (devfreq_remove_device(kbdev->devfreq))
-			dev_err(kbdev->dev, "Fail to rm devfreq\n");
-		kbdev->devfreq = NULL;
-		kbase_devfreq_term_core_mask_table(kbdev);
-		dev_err(kbdev->dev, "Fail to init devfreq workqueue\n");
-		return err;
+		dev_err(kbdev->dev, "Fail to init devfreq workqueue");
+		goto devfreq_work_init_failed;
 	}
 
 	/* devfreq_add_device only copies a few of kbdev->dev's fields, so
@@ -723,33 +710,17 @@ int kbase_devfreq_init(struct kbase_device *kbdev)
 
 	err = devfreq_register_opp_notifier(kbdev->dev, kbdev->devfreq);
 	if (err) {
-		dev_err(kbdev->dev,
-			"Failed to register OPP notifier (%d)\n", err);
+		dev_err(kbdev->dev, "Failed to register OPP notifier (%d)", err);
 		goto opp_notifier_failed;
 	}
 
 #if IS_ENABLED(CONFIG_DEVFREQ_THERMAL)
-#if !IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ_THERMAL)
-	err = kbase_ipa_init(kbdev);
-	if (err) {
-		dev_err(kbdev->dev, "IPA initialization failed\n");
-		goto ipa_init_failed;
-	}
-#endif
-
 	kbdev->devfreq_cooling = of_devfreq_cooling_register_power(
-			kbdev->dev->of_node,
-			kbdev->devfreq,
-#if IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ_THERMAL)
-			&mtk_common_cooling_power_ops);
-#else
-			&kbase_ipa_power_model_ops);
-#endif
+		kbdev->dev->of_node, kbdev->devfreq, &kbase_ipa_power_model_ops);
 	if (IS_ERR_OR_NULL(kbdev->devfreq_cooling)) {
-		err = PTR_ERR(kbdev->devfreq_cooling);
-		dev_err(kbdev->dev,
-			"Failed to register cooling device (%d)\n",
-			err);
+		err = PTR_ERR_OR_ZERO(kbdev->devfreq_cooling);
+		dev_err(kbdev->dev, "Failed to register cooling device (%d)", err);
+		err = err == 0 ? -ENODEV : err;
 		goto cooling_reg_failed;
 	}
 #endif
@@ -758,22 +729,28 @@ int kbase_devfreq_init(struct kbase_device *kbdev)
 
 #if IS_ENABLED(CONFIG_DEVFREQ_THERMAL)
 cooling_reg_failed:
-	kbase_ipa_term(kbdev);
-#if !IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ_THERMAL)
-ipa_init_failed:
-#endif
 	devfreq_unregister_opp_notifier(kbdev->dev, kbdev->devfreq);
 #endif /* CONFIG_DEVFREQ_THERMAL */
 
 opp_notifier_failed:
 	kbase_devfreq_work_term(kbdev);
 
+devfreq_work_init_failed:
 	if (devfreq_remove_device(kbdev->devfreq))
-		dev_err(kbdev->dev, "Failed to terminate devfreq (%d)\n", err);
+		dev_err(kbdev->dev, "Failed to terminate devfreq (%d)", err);
 
 	kbdev->devfreq = NULL;
 
+devfreq_add_dev_failed:
 	kbase_devfreq_term_core_mask_table(kbdev);
+
+init_core_mask_table_failed:
+#if IS_ENABLED(CONFIG_DEVFREQ_THERMAL)
+	kbase_ipa_term(kbdev);
+ipa_init_failed:
+#endif
+	if (free_devfreq_freq_table)
+		kbase_devfreq_term_freq_table(kbdev);
 
 	return err;
 }
@@ -782,15 +759,11 @@ void kbase_devfreq_term(struct kbase_device *kbdev)
 {
 	int err;
 
-	dev_vdbg(kbdev->dev, "Term Mali devfreq\n");
+	dev_dbg(kbdev->dev, "Term Mali devfreq\n");
 
 #if IS_ENABLED(CONFIG_DEVFREQ_THERMAL)
 	if (kbdev->devfreq_cooling)
 		devfreq_cooling_unregister(kbdev->devfreq_cooling);
-
-#if !IS_ENABLED(CONFIG_MALI_MTK_DEVFREQ_THERMAL)
-	kbase_ipa_term(kbdev);
-#endif
 #endif
 
 	devfreq_unregister_opp_notifier(kbdev->dev, kbdev->devfreq);
@@ -804,4 +777,8 @@ void kbase_devfreq_term(struct kbase_device *kbdev)
 		kbdev->devfreq = NULL;
 
 	kbase_devfreq_term_core_mask_table(kbdev);
+
+#if IS_ENABLED(CONFIG_DEVFREQ_THERMAL)
+	kbase_ipa_term(kbdev);
+#endif
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2020-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2020-2023 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -51,9 +51,10 @@ struct kbase_dma_buf {
  * rb_tree is maintained at kbase_device level and kbase_process level
  * by passing the root of kbase_device or kbase_process we can remove
  * the node from the tree.
+ *
+ * Return: true on success.
  */
-static bool kbase_delete_dma_buf_mapping(struct kbase_context *kctx,
-					 struct dma_buf *dma_buf,
+static bool kbase_delete_dma_buf_mapping(struct kbase_context *kctx, struct dma_buf *dma_buf,
 					 struct rb_root *tree)
 {
 	struct kbase_dma_buf *buf_node = NULL;
@@ -100,9 +101,10 @@ static bool kbase_delete_dma_buf_mapping(struct kbase_context *kctx,
  * of all unique dma_buf's mapped to gpu memory. So when attach any
  * dma_buf add it the rb_tree's. To add the unique mapping we need
  * check if the mapping is not a duplicate and then add them.
+ *
+ * Return: true on success
  */
-static bool kbase_capture_dma_buf_mapping(struct kbase_context *kctx,
-					  struct dma_buf *dma_buf,
+static bool kbase_capture_dma_buf_mapping(struct kbase_context *kctx, struct dma_buf *dma_buf,
 					  struct rb_root *root)
 {
 	struct kbase_dma_buf *buf_node = NULL;
@@ -126,8 +128,7 @@ static bool kbase_capture_dma_buf_mapping(struct kbase_context *kctx,
 	}
 
 	if (unique_buf_imported) {
-		struct kbase_dma_buf *new_buf_node =
-			kzalloc(sizeof(*new_buf_node), GFP_KERNEL);
+		struct kbase_dma_buf *new_buf_node = kzalloc(sizeof(*new_buf_node), GFP_KERNEL);
 
 		if (new_buf_node == NULL) {
 			dev_err(kctx->kbdev->dev, "Error allocating memory for kbase_dma_buf\n");
@@ -142,8 +143,7 @@ static bool kbase_capture_dma_buf_mapping(struct kbase_context *kctx,
 				struct kbase_dma_buf *new_node;
 
 				parent = *new;
-				new_node = rb_entry(parent, struct kbase_dma_buf,
-						   dma_buf_node);
+				new_node = rb_entry(parent, struct kbase_dma_buf, dma_buf_node);
 				if (dma_buf < new_node->dma_buf)
 					new = &(*new)->rb_left;
 				else
@@ -159,19 +159,18 @@ static bool kbase_capture_dma_buf_mapping(struct kbase_context *kctx,
 	return unique_buf_imported;
 }
 
-void kbase_remove_dma_buf_usage(struct kbase_context *kctx,
-				struct kbase_mem_phy_alloc *alloc)
+void kbase_remove_dma_buf_usage(struct kbase_context *kctx, struct kbase_mem_phy_alloc *alloc)
 {
 	struct kbase_device *kbdev = kctx->kbdev;
 	bool dev_mapping_removed, prcs_mapping_removed;
 
 	mutex_lock(&kbdev->dma_buf_lock);
 
-	dev_mapping_removed = kbase_delete_dma_buf_mapping(
-		kctx, alloc->imported.umm.dma_buf, &kbdev->dma_buf_root);
+	dev_mapping_removed = kbase_delete_dma_buf_mapping(kctx, alloc->imported.umm.dma_buf,
+							   &kbdev->dma_buf_root);
 
-	prcs_mapping_removed = kbase_delete_dma_buf_mapping(
-		kctx, alloc->imported.umm.dma_buf, &kctx->kprcs->dma_buf_root);
+	prcs_mapping_removed = kbase_delete_dma_buf_mapping(kctx, alloc->imported.umm.dma_buf,
+							    &kctx->kprcs->dma_buf_root);
 
 	WARN_ON(dev_mapping_removed && !prcs_mapping_removed);
 
@@ -189,8 +188,7 @@ void kbase_remove_dma_buf_usage(struct kbase_context *kctx,
 	mutex_unlock(&kbdev->dma_buf_lock);
 }
 
-void kbase_add_dma_buf_usage(struct kbase_context *kctx,
-				    struct kbase_mem_phy_alloc *alloc)
+void kbase_add_dma_buf_usage(struct kbase_context *kctx, struct kbase_mem_phy_alloc *alloc)
 {
 	struct kbase_device *kbdev = kctx->kbdev;
 	bool unique_dev_dmabuf, unique_prcs_dmabuf;
@@ -198,11 +196,11 @@ void kbase_add_dma_buf_usage(struct kbase_context *kctx,
 	mutex_lock(&kbdev->dma_buf_lock);
 
 	/* add dma_buf to device and process. */
-	unique_dev_dmabuf = kbase_capture_dma_buf_mapping(
-		kctx, alloc->imported.umm.dma_buf, &kbdev->dma_buf_root);
+	unique_dev_dmabuf = kbase_capture_dma_buf_mapping(kctx, alloc->imported.umm.dma_buf,
+							  &kbdev->dma_buf_root);
 
-	unique_prcs_dmabuf = kbase_capture_dma_buf_mapping(
-		kctx, alloc->imported.umm.dma_buf, &kctx->kprcs->dma_buf_root);
+	unique_prcs_dmabuf = kbase_capture_dma_buf_mapping(kctx, alloc->imported.umm.dma_buf,
+							   &kctx->kprcs->dma_buf_root);
 
 	WARN_ON(unique_dev_dmabuf && !unique_prcs_dmabuf);
 

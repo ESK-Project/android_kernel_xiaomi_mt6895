@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2020-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2020-2024 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -91,11 +91,7 @@ union kbase_ktrace_backend;
 
 #endif /* KBASE_KTRACE_TARGET_RBUF */
 
-#if MALI_USE_CSF
 #include "debug/backend/mali_kbase_debug_ktrace_defs_csf.h"
-#else
-#include "debug/backend/mali_kbase_debug_ktrace_defs_jm.h"
-#endif
 
 #if KBASE_KTRACE_TARGET_RBUF
 /* Indicates if the trace message has backend related info.
@@ -105,32 +101,30 @@ union kbase_ktrace_backend;
  * - code
  * - flags
  */
-#define KBASE_KTRACE_FLAG_BACKEND     (((kbase_ktrace_flag_t)1) << 7)
+#define KBASE_KTRACE_FLAG_BACKEND (((kbase_ktrace_flag_t)1) << 7)
 
 /* Collect all the common flags together for debug checking */
-#define KBASE_KTRACE_FLAG_COMMON_ALL \
-		(KBASE_KTRACE_FLAG_BACKEND)
+#define KBASE_KTRACE_FLAG_COMMON_ALL (KBASE_KTRACE_FLAG_BACKEND)
 
-#define KBASE_KTRACE_FLAG_ALL \
-		(KBASE_KTRACE_FLAG_COMMON_ALL | KBASE_KTRACE_FLAG_BACKEND_ALL)
+#define KBASE_KTRACE_FLAG_ALL (KBASE_KTRACE_FLAG_COMMON_ALL | KBASE_KTRACE_FLAG_BACKEND_ALL)
 
 #define KBASE_KTRACE_SHIFT (9) /* 512 entries */
 #define KBASE_KTRACE_SIZE (1 << KBASE_KTRACE_SHIFT)
-#define KBASE_KTRACE_MASK ((1 << KBASE_KTRACE_SHIFT)-1)
+#define KBASE_KTRACE_MASK ((1 << KBASE_KTRACE_SHIFT) - 1)
 
-#define KBASE_KTRACE_CODE(X) KBASE_KTRACE_CODE_ ## X
+#define KBASE_KTRACE_CODE(X) KBASE_KTRACE_CODE_##X
 
 /* Note: compiletime_assert() about this against kbase_ktrace_code_t is in
  * kbase_ktrace_init()
  */
 enum kbase_ktrace_code {
-	/*
+/*
 	 * IMPORTANT: USE OF SPECIAL #INCLUDE OF NON-STANDARD HEADER FILE
 	 * THIS MUST BE USED AT THE START OF THE ENUM
 	 */
 #define KBASE_KTRACE_CODE_MAKE_CODE(X) KBASE_KTRACE_CODE(X)
 #include <debug/mali_kbase_debug_ktrace_codes.h>
-#undef  KBASE_KTRACE_CODE_MAKE_CODE
+#undef KBASE_KTRACE_CODE_MAKE_CODE
 	/* Comma on its own, to extend the list */
 	,
 	/* Must be the last in the enum */
@@ -138,8 +132,8 @@ enum kbase_ktrace_code {
 };
 
 /**
- * struct kbase_ktrace - object representing a trace message added to trace
- *                      buffer trace_rbuf in &kbase_device
+ * struct kbase_ktrace_msg - object representing a trace message added to trace
+ *                           buffer trace_rbuf in &kbase_device
  * @timestamp: CPU timestamp at which the trace message was added.
  * @thread_id: id of the thread in the context of which trace message was
  *             added.
@@ -165,22 +159,21 @@ struct kbase_ktrace_msg {
 };
 
 struct kbase_ktrace {
-	spinlock_t              lock;
-	u16                     first_out;
-	u16                     next_in;
+	spinlock_t lock;
+	u16 first_out;
+	u16 next_in;
 	struct kbase_ktrace_msg *rbuf;
 };
-
 
 static inline void kbase_ktrace_compiletime_asserts(void)
 {
 	/* See also documentation of enum kbase_ktrace_code */
 	compiletime_assert(sizeof(kbase_ktrace_code_t) == sizeof(unsigned long long) ||
-			KBASE_KTRACE_CODE_COUNT <= (1ull << (sizeof(kbase_ktrace_code_t) * BITS_PER_BYTE)),
-			"kbase_ktrace_code_t not wide enough for KBASE_KTRACE_CODE_COUNT");
+				   KBASE_KTRACE_CODE_COUNT <=
+					   (1ull << (sizeof(kbase_ktrace_code_t) * BITS_PER_BYTE)),
+			   "kbase_ktrace_code_t not wide enough for KBASE_KTRACE_CODE_COUNT");
 	compiletime_assert((KBASE_KTRACE_FLAG_BACKEND_ALL & KBASE_KTRACE_FLAG_COMMON_ALL) == 0,
-			"KTrace backend flags intersect with KTrace common flags");
-
+			   "KTrace backend flags intersect with KTrace common flags");
 }
 
 #endif /* KBASE_KTRACE_TARGET_RBUF */

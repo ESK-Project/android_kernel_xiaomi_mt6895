@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2019-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2019-2024 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -19,11 +19,14 @@
  *
  */
 
+#ifndef _MALI_KBASE_DEVICE_H_
+#define _MALI_KBASE_DEVICE_H_
+
 #include <mali_kbase.h>
+#include <hw_access/mali_kbase_hw_access.h>
 
 /**
  * kbase_device_get_list - get device list.
- *
  * Get access to device list.
  *
  * Return: Pointer to the linked list head.
@@ -40,7 +43,7 @@ const struct list_head *kbase_device_get_list(void);
 void kbase_device_put_list(const struct list_head *dev_list);
 
 /**
- * Kbase_increment_device_id - increment device id.
+ * kbase_increment_device_id - increment device id.
  *
  * Used to increment device id on successful initialization of the device.
  */
@@ -55,17 +58,20 @@ void kbase_increment_device_id(void);
  * When a device file is opened for the first time,
  * load firmware and initialize hardware counter components.
  *
- * @return 0 on success. An error code on failure.
+ * It is safe for this function to be called multiple times without ill
+ * effects. Only the first call would be effective.
+ *
+ * Return: 0 on success. An error code on failure.
  */
 int kbase_device_firmware_init_once(struct kbase_device *kbdev);
 
 /**
  * kbase_device_init - Device initialisation.
  *
+ * @kbdev: The kbase device structure for the device (must be a valid pointer)
+ *
  * This is called from device probe to initialise various other
  * components needed.
- *
- * @kbdev: The kbase device structure for the device (must be a valid pointer)
  *
  * Return: 0 on success and non-zero value on failure.
  */
@@ -74,48 +80,30 @@ int kbase_device_init(struct kbase_device *kbdev);
 /**
  * kbase_device_term - Device termination.
  *
- * This is called from device remove to terminate various components that
- * were initialised during kbase_device_init.
- *
  * @kbdev: The kbase device structure for the device (must be a valid pointer)
  *
+ * This is called from device remove to terminate various components that
+ * were initialised during kbase_device_init.
  */
 void kbase_device_term(struct kbase_device *kbdev);
 
 /**
- * kbase_reg_write - write to GPU register
- * @kbdev:  Kbase device pointer
- * @offset: Offset of register
- * @value:  Value to write
+ * kbase_gpu_cache_flush_pa_range_and_busy_wait() - Start a cache physical range flush
+ * and busy wait
  *
- * Caller must ensure the GPU is powered (@kbdev->pm.gpu_powered != false).
+ * @kbdev:    kbase device to issue the MMU operation on.
+ * @phys:     Starting address of the physical range to start the operation on.
+ * @nr_bytes: Number of bytes to work on.
+ * @flush_op: Flush command register value to be sent to HW
+ *
+ * Issue a cache flush physical range command, then busy wait an irq status.
+ * This function will clear FLUSH_PA_RANGE_COMPLETED irq mask bit
+ * and busy-wait the rawstat register.
+ *
+ * Return: 0 if successful or a negative error code on failure.
  */
-void kbase_reg_write(struct kbase_device *kbdev, u32 offset, u32 value);
-
-/**
- * kbase_reg_read - read from GPU register
- * @kbdev:  Kbase device pointer
- * @offset: Offset of register
- *
- * Caller must ensure the GPU is powered (@kbdev->pm.gpu_powered != false).
- *
- * Return: Value in desired register
- */
-u32 kbase_reg_read(struct kbase_device *kbdev, u32 offset);
-
-/**
- * kbase_is_gpu_removed() - Has the GPU been removed.
- * @kbdev:    Kbase device pointer
- *
- * When Kbase takes too long to give up the GPU, the Arbiter
- * can remove it.  This will then be followed by a GPU lost event.
- * This function will return true if the GPU has been removed.
- * When this happens register reads will be zero. A zero GPU_ID is
- * invalid so this is used to detect when GPU is removed.
- *
- * Return: True if GPU removed
- */
-bool kbase_is_gpu_removed(struct kbase_device *kbdev);
+int kbase_gpu_cache_flush_pa_range_and_busy_wait(struct kbase_device *kbdev, phys_addr_t phys,
+						 size_t nr_bytes, u32 flush_op);
 
 /**
  * kbase_gpu_cache_flush_and_busy_wait - Start a cache flush and busy wait
@@ -171,11 +159,11 @@ void kbase_gpu_wait_cache_clean(struct kbase_device *kbdev);
  * called from paths (like GPU reset) where an indefinite wait for the
  * completion of cache clean operation can cause deadlock, as the operation may
  * never complete.
+ * If cache clean times out, reset GPU to recover.
  *
  * Return: 0 if successful or a negative error code on failure.
  */
-int kbase_gpu_wait_cache_clean_timeout(struct kbase_device *kbdev,
-		unsigned int wait_timeout_ms);
+int kbase_gpu_wait_cache_clean_timeout(struct kbase_device *kbdev, unsigned int wait_timeout_ms);
 
 /**
  * kbase_gpu_cache_clean_wait_complete - Called after the cache cleaning is
@@ -188,7 +176,7 @@ int kbase_gpu_wait_cache_clean_timeout(struct kbase_device *kbdev,
 void kbase_gpu_cache_clean_wait_complete(struct kbase_device *kbdev);
 
 /**
- * kbase_clean_caches_done - Issue preiously queued cache clean request or
+ * kbase_clean_caches_done - Issue previously queued cache clean request or
  *                           wake up the requester that issued cache clean.
  * @kbdev: Kbase device
  *
@@ -205,3 +193,14 @@ void kbase_clean_caches_done(struct kbase_device *kbdev);
  * handled.
  */
 void kbase_gpu_interrupt(struct kbase_device *kbdev, u32 val);
+
+/**
+ * kbase_pwr_interrupt - GPU power interrupt handler
+ * @kbdev: Kbase device pointer
+ * @val:   The value of the PWR IRQ status register which triggered the call
+ *
+ * This function is called from the interrupt handler when a PWR irq is to be
+ * handled.
+ */
+void kbase_pwr_interrupt(struct kbase_device *kbdev, u32 val);
+#endif /* _MALI_KBASE_DEVICE_H_ */

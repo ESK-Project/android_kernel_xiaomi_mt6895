@@ -17,13 +17,20 @@
  * where no counter exists.
  */
 
-#include "mali_kbase_gator_hwcnt_names_ttrx.h"
+// #include "mali_kbase_gator_hwcnt_names_ttrx.h"
 
-#include "mali_kbase_gator_hwcnt_names_tnax.h"
+// #include "mali_kbase_gator_hwcnt_names_tnax.h"
 
-#include "mali_kbase_gator_hwcnt_names_tbex.h"
+// #include "mali_kbase_gator_hwcnt_names_tbex.h"
 
-#include "mali_kbase_gator_hwcnt_names_todx.h"
+// #include "mali_kbase_gator_hwcnt_names_todx.h"
 
+// #include "mali_kbase_gator_hwcnt_names_ttux.h"
+
+#include "mali_kbase_gator_hwcnt_names_ttix.h"
+
+#include "mali_kbase_gator_hwcnt_names_tkrx.h"
+
+#include "mali_kbase_gator_hwcnt_names_tdrx.h"
 
 #endif

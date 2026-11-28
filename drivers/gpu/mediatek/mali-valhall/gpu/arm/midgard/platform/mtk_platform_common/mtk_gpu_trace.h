@@ -14,19 +14,19 @@
 
 
 TRACE_EVENT(perf_index_gpu,
-	TP_PROTO(u32 *gpu_data, u32 lens),
+	TP_PROTO(u64 *gpu_data, u32 lens),
 	TP_ARGS(gpu_data, lens),
 	TP_STRUCT__entry(
-		__dynamic_array(u32, gpu_data, lens)
+		__dynamic_array(u64, gpu_data, lens)
 		__field(u32, lens)
 	),
 	TP_fast_assign(
 		memcpy(__get_dynamic_array(gpu_data), gpu_data,
-			lens * sizeof(u32));
+			lens * sizeof(u64));
 		__entry->lens = lens;
 	),
 	TP_printk("data=%s", __print_array(__get_dynamic_array(gpu_data),
-		__entry->lens, sizeof(u32)))
+		__entry->lens, sizeof(u64)))
 );
 
 #endif /*_MTK_GPU_TRACE_H */

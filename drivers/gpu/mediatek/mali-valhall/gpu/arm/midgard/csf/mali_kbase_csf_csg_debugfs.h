@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2019-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2019-2023 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -22,12 +22,9 @@
 #ifndef _KBASE_CSF_CSG_DEBUGFS_H_
 #define _KBASE_CSF_CSG_DEBUGFS_H_
 
-/* Forward declarations */
-struct kbase_device;
+/* Forward declaration */
 struct kbase_context;
-struct kbase_queue_group;
-
-#define MALI_CSF_CSG_DEBUGFS_VERSION 0
+struct kbase_device;
 
 /**
  * kbase_csf_queue_group_debugfs_init() - Add debugfs entry for queue groups
@@ -43,8 +40,5 @@ void kbase_csf_queue_group_debugfs_init(struct kbase_context *kctx);
  * @kbdev: Pointer to the device
  */
 void kbase_csf_debugfs_init(struct kbase_device *kbdev);
-
-void kbase_csf_local_fence_wait_dump(struct kbase_context *kctx, unsigned int pid,
-                                     unsigned int flags, unsigned long time_in_microseconds);
 
 #endif /* _KBASE_CSF_CSG_DEBUGFS_H_ */

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2019-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2019-2024 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -20,415 +20,105 @@
  */
 
 #include "mali_kbase_csf_csg_debugfs.h"
-#include <mali_kbase.h>
-#include <linux/seq_file.h>
-#include <linux/delay.h>
-#include <csf/mali_kbase_csf_trace_buffer.h>
 
-#include <mali_kbase_sync.h>
-#include <csf/mali_kbase_csf_kcpu_debugfs.h>
-#include <csf/mali_kbase_csf_cpu_queue_debugfs.h>
-#include <csf/mali_kbase_csf.h>
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_FS)
+#include <platform/mtk_platform_common.h>
+#endif /* CONFIG_MALI_MTK_DEBUG_FS */
 
 #if IS_ENABLED(CONFIG_DEBUG_FS)
+#include "mali_kbase_csf_csg.h"
 #include "mali_kbase_csf_tl_reader.h"
+#include "mali_kbase_csf_util.h"
+#include <mali_kbase.h>
+#include <linux/seq_file.h>
+#include <linux/version_compat_defs.h>
+#include <mali_kbase_reset_gpu.h>
+#include <mali_kbase_config_defaults.h>
 
+#define MAX_SCHED_STATE_STRING_LEN (16)
 /**
- * blocked_reason_to_string() - Convert blocking reason id to a string
+ * scheduler_state_to_string() - Get string name of scheduler state.
  *
- * @reason_id: blocked_reason
+ * @kbdev:       Pointer to kbase device.
+ * @sched_state: Scheduler state.
  *
- * Return: Suitable string
+ * Return: Suitable string.
  */
-static const char *blocked_reason_to_string(u32 reason_id)
+static const char *scheduler_state_to_string(struct kbase_device *kbdev,
+					     enum kbase_csf_scheduler_state sched_state)
 {
-	/* possible blocking reasons of a cs */
-	static const char *const cs_blocked_reason[] = {
-		[CS_STATUS_BLOCKED_REASON_REASON_UNBLOCKED] = "UNBLOCKED",
-		[CS_STATUS_BLOCKED_REASON_REASON_WAIT] = "WAIT",
-		[CS_STATUS_BLOCKED_REASON_REASON_PROGRESS_WAIT] =
-			"PROGRESS_WAIT",
-		[CS_STATUS_BLOCKED_REASON_REASON_SYNC_WAIT] = "SYNC_WAIT",
-		[CS_STATUS_BLOCKED_REASON_REASON_DEFERRED] = "DEFERRED",
-		[CS_STATUS_BLOCKED_REASON_REASON_RESOURCE] = "RESOURCE",
-		[CS_STATUS_BLOCKED_REASON_REASON_FLUSH] = "FLUSH"
-	};
-
-	if (WARN_ON(reason_id >= ARRAY_SIZE(cs_blocked_reason)))
-		return "UNKNOWN_BLOCKED_REASON_ID";
-
-	return cs_blocked_reason[reason_id];
-}
-
-static void kbasep_csf_scheduler_dump_active_queue_cs_status_wait(
-	struct seq_file *file, u32 wait_status, u32 wait_sync_value,
-	u64 wait_sync_live_value, u64 wait_sync_pointer, u32 sb_status,
-	u32 blocked_reason)
-{
-#define WAITING "Waiting"
-#define NOT_WAITING "Not waiting"
-
-	seq_printf(file, "SB_MASK: %d\n",
-			CS_STATUS_WAIT_SB_MASK_GET(wait_status));
-	seq_printf(file, "PROGRESS_WAIT: %s\n",
-			CS_STATUS_WAIT_PROGRESS_WAIT_GET(wait_status) ?
-			WAITING : NOT_WAITING);
-	seq_printf(file, "PROTM_PEND: %s\n",
-			CS_STATUS_WAIT_PROTM_PEND_GET(wait_status) ?
-			WAITING : NOT_WAITING);
-	seq_printf(file, "SYNC_WAIT: %s\n",
-			CS_STATUS_WAIT_SYNC_WAIT_GET(wait_status) ?
-			WAITING : NOT_WAITING);
-	seq_printf(file, "WAIT_CONDITION: %s\n",
-			CS_STATUS_WAIT_SYNC_WAIT_CONDITION_GET(wait_status) ?
-			"greater than" : "less or equal");
-	seq_printf(file, "SYNC_POINTER: 0x%llx\n", wait_sync_pointer);
-	seq_printf(file, "SYNC_VALUE: %d\n", wait_sync_value);
-	seq_printf(file, "SYNC_LIVE_VALUE: 0x%016llx\n", wait_sync_live_value);
-	seq_printf(file, "SB_STATUS: %u\n",
-		   CS_STATUS_SCOREBOARDS_NONZERO_GET(sb_status));
-	seq_printf(file, "BLOCKED_REASON: %s\n",
-		   blocked_reason_to_string(CS_STATUS_BLOCKED_REASON_REASON_GET(
-			   blocked_reason)));
-}
-
-static void kbasep_csf_scheduler_dump_active_cs_trace(struct seq_file *file,
-			struct kbase_csf_cmd_stream_info const *const stream)
-{
-	u32 val = kbase_csf_firmware_cs_input_read(stream,
-			CS_INSTR_BUFFER_BASE_LO);
-	u64 addr = ((u64)kbase_csf_firmware_cs_input_read(stream,
-				CS_INSTR_BUFFER_BASE_HI) << 32) | val;
-	val = kbase_csf_firmware_cs_input_read(stream,
-				CS_INSTR_BUFFER_SIZE);
-
-	seq_printf(file, "CS_TRACE_BUF_ADDR: 0x%16llx, SIZE: %u\n", addr, val);
-
-	/* Write offset variable address (pointer) */
-	val = kbase_csf_firmware_cs_input_read(stream,
-			CS_INSTR_BUFFER_OFFSET_POINTER_LO);
-	addr = ((u64)kbase_csf_firmware_cs_input_read(stream,
-			CS_INSTR_BUFFER_OFFSET_POINTER_HI) << 32) | val;
-	seq_printf(file, "CS_TRACE_BUF_OFFSET_PTR: 0x%16llx\n", addr);
-
-	/* EVENT_SIZE and EVENT_STATEs */
-	val = kbase_csf_firmware_cs_input_read(stream, CS_INSTR_CONFIG);
-	seq_printf(file, "TRACE_EVENT_SIZE: 0x%x, TRACE_EVENT_STAES 0x%x\n",
-			CS_INSTR_CONFIG_EVENT_SIZE_GET(val),
-			CS_INSTR_CONFIG_EVENT_STATE_GET(val));
+	switch (sched_state) {
+	case SCHED_BUSY:
+		return "BUSY";
+	case SCHED_INACTIVE:
+		return "INACTIVE";
+	case SCHED_SUSPENDED:
+		return "SUSPENDED";
+	case SCHED_SLEEPING:
+		return "SLEEPING";
+	default:
+		dev_warn(kbdev->dev, "Unknown Scheduler state %d", sched_state);
+		return NULL;
+	}
 }
 
 /**
- * kbasep_csf_scheduler_dump_active_queue() - Print GPU command queue
- *                                            debug information
- *
- * @file:  seq_file for printing to
- * @queue: Address of a GPU command queue to examine
- */
-static void kbasep_csf_scheduler_dump_active_queue(struct seq_file *file,
-		struct kbase_queue *queue)
-{
-	u32 *addr;
-	u64 cs_extract;
-	u64 cs_insert;
-	u32 cs_active;
-	u64 wait_sync_pointer;
-	u32 wait_status, wait_sync_value;
-	u32 sb_status;
-	u32 blocked_reason;
-	struct kbase_vmap_struct *mapping;
-	u64 *evt;
-	u64 wait_sync_live_value;
-
-	if (!queue)
-		return;
-
-	if (WARN_ON(queue->csi_index == KBASEP_IF_NR_INVALID ||
-		    !queue->group))
-		return;
-
-	/* Ring the doorbell to have firmware update CS_EXTRACT */
-	kbase_csf_ring_cs_user_doorbell(queue->kctx->kbdev, queue);
-	msleep(100);
-
-	addr = (u32 *)queue->user_io_addr;
-	cs_insert = addr[CS_INSERT_LO/4] | ((u64)addr[CS_INSERT_HI/4] << 32);
-
-	addr = (u32 *)(queue->user_io_addr + PAGE_SIZE);
-	cs_extract = addr[CS_EXTRACT_LO/4] | ((u64)addr[CS_EXTRACT_HI/4] << 32);
-	cs_active = addr[CS_ACTIVE/4];
-
-#define KBASEP_CSF_DEBUGFS_CS_HEADER_USER_IO \
-	"Bind Idx,     Ringbuf addr, Prio,    Insert offset,   Extract offset, Active, Doorbell\n"
-
-	seq_printf(file, KBASEP_CSF_DEBUGFS_CS_HEADER_USER_IO "%8d, %16llx, %4u, %16llx, %16llx, %6u, %8d\n",
-			queue->csi_index, queue->base_addr, queue->priority,
-			cs_insert, cs_extract, cs_active, queue->doorbell_nr);
-
-	/* Print status information for blocked group waiting for sync object. For on-slot queues,
-	 * if cs_trace is enabled, dump the interface's cs_trace configuration.
-	 */
-	if (kbase_csf_scheduler_group_get_slot(queue->group) < 0) {
-		if (CS_STATUS_WAIT_SYNC_WAIT_GET(queue->status_wait)) {
-			wait_status = queue->status_wait;
-			wait_sync_value = queue->sync_value;
-			wait_sync_pointer = queue->sync_ptr;
-			sb_status = queue->sb_status;
-			blocked_reason = queue->blocked_reason;
-
-			evt = (u64 *)kbase_phy_alloc_mapping_get(queue->kctx, wait_sync_pointer, &mapping);
-			if (evt) {
-				wait_sync_live_value = evt[0];
-				kbase_phy_alloc_mapping_put(queue->kctx, mapping);
-			} else {
-				wait_sync_live_value = U64_MAX;
-			}
-
-			kbasep_csf_scheduler_dump_active_queue_cs_status_wait(
-				file, wait_status, wait_sync_value,
-				wait_sync_live_value, wait_sync_pointer,
-				sb_status, blocked_reason);
-		}
-	} else {
-		struct kbase_device const *const kbdev =
-			queue->group->kctx->kbdev;
-		struct kbase_csf_cmd_stream_group_info const *const ginfo =
-			&kbdev->csf.global_iface.groups[queue->group->csg_nr];
-		struct kbase_csf_cmd_stream_info const *const stream =
-			&ginfo->streams[queue->csi_index];
-		u64 cmd_ptr;
-		u32 req_res;
-
-		if (WARN_ON(!stream))
-			return;
-
-		cmd_ptr = kbase_csf_firmware_cs_output(stream,
-				CS_STATUS_CMD_PTR_LO);
-		cmd_ptr |= (u64)kbase_csf_firmware_cs_output(stream,
-				CS_STATUS_CMD_PTR_HI) << 32;
-		req_res = kbase_csf_firmware_cs_output(stream,
-					CS_STATUS_REQ_RESOURCE);
-
-		seq_printf(file, "CMD_PTR: 0x%llx\n", cmd_ptr);
-		seq_printf(file, "REQ_RESOURCE [COMPUTE]: %d\n",
-			CS_STATUS_REQ_RESOURCE_COMPUTE_RESOURCES_GET(req_res));
-		seq_printf(file, "REQ_RESOURCE [FRAGMENT]: %d\n",
-			CS_STATUS_REQ_RESOURCE_FRAGMENT_RESOURCES_GET(req_res));
-		seq_printf(file, "REQ_RESOURCE [TILER]: %d\n",
-			CS_STATUS_REQ_RESOURCE_TILER_RESOURCES_GET(req_res));
-		seq_printf(file, "REQ_RESOURCE [IDVS]: %d\n",
-			CS_STATUS_REQ_RESOURCE_IDVS_RESOURCES_GET(req_res));
-
-		wait_status = kbase_csf_firmware_cs_output(stream,
-				CS_STATUS_WAIT);
-		wait_sync_value = kbase_csf_firmware_cs_output(stream,
-					CS_STATUS_WAIT_SYNC_VALUE);
-		wait_sync_pointer = kbase_csf_firmware_cs_output(stream,
-					CS_STATUS_WAIT_SYNC_POINTER_LO);
-		wait_sync_pointer |= (u64)kbase_csf_firmware_cs_output(stream,
-					CS_STATUS_WAIT_SYNC_POINTER_HI) << 32;
-
-		sb_status = kbase_csf_firmware_cs_output(stream,
-							 CS_STATUS_SCOREBOARDS);
-		blocked_reason = kbase_csf_firmware_cs_output(
-			stream, CS_STATUS_BLOCKED_REASON);
-
-		evt = (u64 *)kbase_phy_alloc_mapping_get(queue->kctx, wait_sync_pointer, &mapping);
-		if (evt) {
-			wait_sync_live_value = evt[0];
-			kbase_phy_alloc_mapping_put(queue->kctx, mapping);
-		} else {
-			wait_sync_live_value = U64_MAX;
-		}
-
-		kbasep_csf_scheduler_dump_active_queue_cs_status_wait(
-			file, wait_status, wait_sync_value,
-			wait_sync_live_value, wait_sync_pointer, sb_status,
-			blocked_reason);
-		/* Dealing with cs_trace */
-		if (kbase_csf_scheduler_queue_has_trace(queue))
-			kbasep_csf_scheduler_dump_active_cs_trace(file, stream);
-		else
-			seq_puts(file, "NO CS_TRACE\n");
-	}
-
-	seq_puts(file, "\n");
-}
-
-/* Waiting timeout for STATUS_UPDATE acknowledgment, in milliseconds */
-#define CSF_STATUS_UPDATE_TO_MS (100)
-
-static void kbasep_csf_scheduler_dump_active_group(struct seq_file *file,
-		struct kbase_queue_group *const group)
-{
-	if (kbase_csf_scheduler_group_get_slot(group) >= 0) {
-		struct kbase_device *const kbdev = group->kctx->kbdev;
-		unsigned long flags;
-		u32 ep_c, ep_r;
-		char exclusive;
-		struct kbase_csf_cmd_stream_group_info const *const ginfo =
-			&kbdev->csf.global_iface.groups[group->csg_nr];
-		long remaining =
-			kbase_csf_timeout_in_jiffies(CSF_STATUS_UPDATE_TO_MS);
-		u8 slot_priority =
-			kbdev->csf.scheduler.csg_slots[group->csg_nr].priority;
-
-		kbase_csf_scheduler_spin_lock(kbdev, &flags);
-		kbase_csf_firmware_csg_input_mask(ginfo, CSG_REQ,
-				~kbase_csf_firmware_csg_output(ginfo, CSG_ACK),
-				CSG_REQ_STATUS_UPDATE_MASK);
-		kbase_csf_ring_csg_doorbell(kbdev, group->csg_nr);
-		kbase_csf_scheduler_spin_unlock(kbdev, flags);
-
-		remaining = wait_event_timeout(kbdev->csf.event_wait,
-			!((kbase_csf_firmware_csg_input_read(ginfo, CSG_REQ) ^
-			   kbase_csf_firmware_csg_output(ginfo, CSG_ACK)) &
-			   CSG_REQ_STATUS_UPDATE_MASK), remaining);
-
-		ep_c = kbase_csf_firmware_csg_output(ginfo,
-				CSG_STATUS_EP_CURRENT);
-		ep_r = kbase_csf_firmware_csg_output(ginfo, CSG_STATUS_EP_REQ);
-
-		if (CSG_STATUS_EP_REQ_EXCLUSIVE_COMPUTE_GET(ep_r))
-			exclusive = 'C';
-		else if (CSG_STATUS_EP_REQ_EXCLUSIVE_FRAGMENT_GET(ep_r))
-			exclusive = 'F';
-		else
-			exclusive = '0';
-
-		if (!remaining) {
-			dev_err(kbdev->dev,
-				"Timed out for STATUS_UPDATE on group %d on slot %d",
-				group->handle, group->csg_nr);
-
-			seq_printf(file, "*** Warn: Timed out for STATUS_UPDATE on slot %d\n",
-				group->csg_nr);
-			seq_printf(file, "*** The following group-record is likely stale\n");
-		}
-
-		seq_puts(file, "GroupID, CSG NR, CSG Prio, Run State, Priority, C_EP(Alloc/Req), F_EP(Alloc/Req), T_EP(Alloc/Req), Exclusive\n");
-		seq_printf(file, "%7d, %6d, %8d, %9d, %8d, %11d/%3d, %11d/%3d, %11d/%3d, %9c\n",
-			group->handle,
-			group->csg_nr,
-			slot_priority,
-			group->run_state,
-			group->priority,
-			CSG_STATUS_EP_CURRENT_COMPUTE_EP_GET(ep_c),
-			CSG_STATUS_EP_REQ_COMPUTE_EP_GET(ep_r),
-			CSG_STATUS_EP_CURRENT_FRAGMENT_EP_GET(ep_c),
-			CSG_STATUS_EP_REQ_FRAGMENT_EP_GET(ep_r),
-			CSG_STATUS_EP_CURRENT_TILER_EP_GET(ep_c),
-			CSG_STATUS_EP_REQ_TILER_EP_GET(ep_r),
-			exclusive);
-	} else {
-		seq_puts(file, "GroupID, CSG NR, Run State, Priority\n");
-		seq_printf(file, "%7d, %6d, %9d, %8d\n",
-			group->handle,
-			group->csg_nr,
-			group->run_state,
-			group->priority);
-	}
-
-	if (group->run_state != KBASE_CSF_GROUP_TERMINATED) {
-		unsigned int i;
-
-		seq_puts(file, "Bound queues:\n");
-
-		for (i = 0; i < MAX_SUPPORTED_STREAMS_PER_GROUP; i++) {
-			kbasep_csf_scheduler_dump_active_queue(file,
-					group->bound_queues[i]);
-		}
-	}
-
-	seq_puts(file, "\n");
-}
-
-/**
- * kbasep_csf_queue_group_debugfs_show() - Print per-context GPU command queue
- *					   group debug information
+ * kbasep_csf_queue_show_groups() - Print per-context GPU command queue
+ *                                  group debug information
  *
  * @file: The seq_file for printing to
  * @data: The debugfs dentry private data, a pointer to kbase context
  *
  * Return: Negative error code or 0 on success.
  */
-static int kbasep_csf_queue_group_debugfs_show(struct seq_file *file,
-		void *data)
+static int kbasep_csf_queue_show_groups(struct seq_file *file, void *data)
 {
-	u32 gr;
+	struct kbasep_printer *kbpr;
 	struct kbase_context *const kctx = file->private;
-	struct kbase_device *const kbdev = kctx->kbdev;
+	int ret = -EINVAL;
+	CSTD_UNUSED(data);
 
-	if (WARN_ON(!kctx))
-		return -EINVAL;
-
-	seq_printf(file, "MALI_CSF_CSG_DEBUGFS_VERSION: v%u\n",
-			MALI_CSF_CSG_DEBUGFS_VERSION);
-
-	mutex_lock(&kctx->csf.lock);
-	kbase_csf_scheduler_lock(kbdev);
-	for (gr = 0; gr < MAX_QUEUE_GROUP_NUM; gr++) {
-		struct kbase_queue_group *const group =
-			kctx->csf.queue_groups[gr];
-
-		if (group)
-			kbasep_csf_scheduler_dump_active_group(file, group);
+	kbpr = kbasep_printer_file_init(file);
+	if (kbpr != NULL) {
+		ret = kbasep_csf_csg_dump_print(kctx, kbpr);
+		kbasep_printer_term(kbpr);
 	}
-	kbase_csf_scheduler_unlock(kbdev);
-	mutex_unlock(&kctx->csf.lock);
 
-	return 0;
+	return ret;
 }
 
 /**
- * kbasep_csf_scheduler_dump_active_groups() - Print debug info for active
- *                                             GPU command queue groups
+ * kbasep_csf_csg_active_show_groups() - Print debug info for active GPU command queue groups
  *
  * @file: The seq_file for printing to
  * @data: The debugfs dentry private data, a pointer to kbase_device
  *
  * Return: Negative error code or 0 on success.
  */
-static int kbasep_csf_scheduler_dump_active_groups(struct seq_file *file,
-		void *data)
+static int kbasep_csf_csg_active_show_groups(struct seq_file *file, void *data)
 {
-	u32 csg_nr;
 	struct kbase_device *kbdev = file->private;
-	u32 num_groups = kbdev->csf.global_iface.group_num;
+	struct kbasep_printer *kbpr;
+	int ret = -EINVAL;
+	CSTD_UNUSED(data);
 
-	seq_printf(file, "MALI_CSF_CSG_DEBUGFS_VERSION: v%u\n",
-			MALI_CSF_CSG_DEBUGFS_VERSION);
-
-	kbase_csf_scheduler_lock(kbdev);
-	for (csg_nr = 0; csg_nr < num_groups; csg_nr++) {
-		struct kbase_queue_group *const group =
-			kbdev->csf.scheduler.csg_slots[csg_nr].resident_group;
-
-		if (!group)
-			continue;
-
-		seq_printf(file, "\nCtx %d_%d\n", group->kctx->tgid,
-				group->kctx->id);
-
-		kbasep_csf_scheduler_dump_active_group(file, group);
+	kbpr = kbasep_printer_file_init(file);
+	if (kbpr != NULL) {
+		ret = kbasep_csf_csg_active_dump_print(kbdev, kbpr);
+		kbasep_printer_term(kbpr);
 	}
-	kbase_csf_scheduler_unlock(kbdev);
 
-	return 0;
+	return ret;
 }
 
-static int kbasep_csf_queue_group_debugfs_open(struct inode *in,
-		struct file *file)
+static int kbasep_csf_queue_group_debugfs_open(struct inode *in, struct file *file)
 {
-	return single_open(file, kbasep_csf_queue_group_debugfs_show,
-			in->i_private);
+	return single_open(file, kbasep_csf_queue_show_groups, in->i_private);
 }
 
-static int kbasep_csf_active_queue_groups_debugfs_open(struct inode *in,
-		struct file *file)
+static int kbasep_csf_active_queue_groups_debugfs_open(struct inode *in, struct file *file)
 {
-	return single_open(file, kbasep_csf_scheduler_dump_active_groups,
-			in->i_private);
+	return single_open(file, kbasep_csf_csg_active_show_groups, in->i_private);
 }
 
 static const struct file_operations kbasep_csf_queue_group_debugfs_fops = {
@@ -441,34 +131,28 @@ static const struct file_operations kbasep_csf_queue_group_debugfs_fops = {
 void kbase_csf_queue_group_debugfs_init(struct kbase_context *kctx)
 {
 	struct dentry *file;
-#if (KERNEL_VERSION(4, 7, 0) <= LINUX_VERSION_CODE)
 	const mode_t mode = 0444;
-#else
-	const mode_t mode = 0400;
-#endif
 
 	if (WARN_ON(!kctx || IS_ERR_OR_NULL(kctx->kctx_dentry)))
 		return;
 
-	file = debugfs_create_file("groups", mode,
-		kctx->kctx_dentry, kctx, &kbasep_csf_queue_group_debugfs_fops);
+	file = debugfs_create_file("groups", mode, kctx->kctx_dentry, kctx,
+				   &kbasep_csf_queue_group_debugfs_fops);
 
 	if (IS_ERR_OR_NULL(file)) {
 		dev_warn(kctx->kbdev->dev,
-		    "Unable to create per context queue groups debugfs entry");
+			 "Unable to create per context queue groups debugfs entry");
 	}
 }
 
-static const struct file_operations
-	kbasep_csf_active_queue_groups_debugfs_fops = {
+static const struct file_operations kbasep_csf_active_queue_groups_debugfs_fops = {
 	.open = kbasep_csf_active_queue_groups_debugfs_open,
 	.read = seq_read,
 	.llseek = seq_lseek,
 	.release = single_release,
 };
 
-static int kbasep_csf_debugfs_scheduling_timer_enabled_get(
-		void *data, u64 *val)
+static int kbasep_csf_debugfs_scheduling_timer_enabled_get(void *data, u64 *val)
 {
 	struct kbase_device *const kbdev = data;
 
@@ -477,8 +161,7 @@ static int kbasep_csf_debugfs_scheduling_timer_enabled_get(
 	return 0;
 }
 
-static int kbasep_csf_debugfs_scheduling_timer_enabled_set(
-		void *data, u64 val)
+static int kbasep_csf_debugfs_scheduling_timer_enabled_set(void *data, u64 val)
 {
 	struct kbase_device *const kbdev = data;
 
@@ -487,98 +170,207 @@ static int kbasep_csf_debugfs_scheduling_timer_enabled_set(
 	return 0;
 }
 
-static int kbasep_csf_debugfs_scheduling_timer_kick_set(
-		void *data, u64 val)
+static int kbasep_csf_debugfs_scheduling_timer_kick_set(void *data, u64 val)
 {
 	struct kbase_device *const kbdev = data;
+	CSTD_UNUSED(val);
 
 	kbase_csf_scheduler_kick(kbdev);
 
 	return 0;
 }
 
-DEFINE_SIMPLE_ATTRIBUTE(kbasep_csf_debugfs_scheduling_timer_enabled_fops,
-		&kbasep_csf_debugfs_scheduling_timer_enabled_get,
-		&kbasep_csf_debugfs_scheduling_timer_enabled_set,
-		"%llu\n");
-DEFINE_SIMPLE_ATTRIBUTE(kbasep_csf_debugfs_scheduling_timer_kick_fops,
-		NULL,
-		&kbasep_csf_debugfs_scheduling_timer_kick_set,
-		"%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(kbasep_csf_debugfs_scheduling_timer_enabled_fops,
+			 &kbasep_csf_debugfs_scheduling_timer_enabled_get,
+			 &kbasep_csf_debugfs_scheduling_timer_enabled_set, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(kbasep_csf_debugfs_scheduling_timer_kick_fops, NULL,
+			 &kbasep_csf_debugfs_scheduling_timer_kick_set, "%llu\n");
 
 /**
- * kbase_csf_debugfs_scheduler_suspend_get() - get if the scheduler is suspended.
+ * kbase_csf_debugfs_scheduler_state_get() - Get the state of scheduler.
  *
- * @data: The debugfs dentry private data, a pointer to kbase_device
- * @val: The debugfs output value, boolean: 1 suspended, 0 otherwise
+ * @file:     Object of the file that is being read.
+ * @user_buf: User buffer that contains the string.
+ * @count:    Length of user buffer
+ * @ppos:     Offset within file object
  *
- * Return: 0
+ * This function will return the current Scheduler state to Userspace
+ * Scheduler may exit that state by the time the state string is received
+ * by the Userspace.
+ *
+ * Return: 0 if Scheduler was found in an unexpected state, or the
+ *         size of the state string if it was copied successfully to the
+ *         User buffer or a negative value in case of an error.
  */
-static int kbase_csf_debugfs_scheduler_suspend_get(
-		void *data, u64 *val)
+static ssize_t kbase_csf_debugfs_scheduler_state_get(struct file *file, char __user *user_buf,
+						     size_t count, loff_t *ppos)
 {
-	struct kbase_device *kbdev = data;
+	struct kbase_device *kbdev = file->private_data;
 	struct kbase_csf_scheduler *scheduler = &kbdev->csf.scheduler;
+	const char *state_string;
 
 	kbase_csf_scheduler_lock(kbdev);
-	*val = (scheduler->state == SCHED_SUSPENDED);
+	state_string = scheduler_state_to_string(kbdev, scheduler->state);
 	kbase_csf_scheduler_unlock(kbdev);
 
-	return 0;
+	if (!state_string)
+		count = 0;
+
+	return simple_read_from_buffer(user_buf, count, ppos, state_string, strlen(state_string));
 }
 
 /**
- * kbase_csf_debugfs_scheduler_suspend_set() - set the scheduler to suspended.
+ * kbase_csf_debugfs_scheduler_state_set() - Set the state of scheduler.
  *
- * @data: The debugfs dentry private data, a pointer to kbase_device
- * @val: The debugfs input value, boolean: 1 suspend, 0 otherwise
+ * @file:  Object of the file that is being written to.
+ * @ubuf:  User buffer that contains the string.
+ * @count: Length of user buffer
+ * @ppos:  Offset within file object
  *
- * Return: Negative value if already in requested state, 0 otherwise.
+ * This function will update the Scheduler state as per the state string
+ * passed by the Userspace. Scheduler may or may not remain in new state
+ * for long.
+ *
+ * Return: Negative value if the string doesn't correspond to a valid Scheduler
+ *         state or if copy from user buffer failed, otherwise the length of
+ *         the User buffer.
  */
-static int kbase_csf_debugfs_scheduler_suspend_set(
-		void *data, u64 val)
+static ssize_t kbase_csf_debugfs_scheduler_state_set(struct file *file, const char __user *ubuf,
+						     size_t count, loff_t *ppos)
 {
-	struct kbase_device *kbdev = data;
-	struct kbase_csf_scheduler *scheduler = &kbdev->csf.scheduler;
-	enum kbase_csf_scheduler_state state;
+	struct kbase_device *kbdev = file->private_data;
+	char buf[MAX_SCHED_STATE_STRING_LEN];
 
-	kbase_csf_scheduler_lock(kbdev);
-	state = scheduler->state;
-	kbase_csf_scheduler_unlock(kbdev);
+	CSTD_UNUSED(ppos);
 
-	if (val && (state != SCHED_SUSPENDED))
+	count = min_t(size_t, sizeof(buf) - 1, count);
+	if (copy_from_user(buf, ubuf, count))
+		return -EFAULT;
+
+	buf[count] = 0;
+
+	if (sysfs_streq(buf, "SUSPENDED"))
 		kbase_csf_scheduler_pm_suspend(kbdev);
-	else if (!val && (state == SCHED_SUSPENDED))
-		kbase_csf_scheduler_pm_resume(kbdev);
-	else
-		return -1;
+	else if (IS_ENABLED(CONFIG_PM) && sysfs_streq(buf, "SLEEPING"))
+		kbase_csf_scheduler_force_sleep(kbdev);
+	else if (sysfs_streq(buf, "INACTIVE"))
+		kbase_csf_scheduler_force_wakeup(kbdev);
+	else {
+		dev_dbg(kbdev->dev, "Bad scheduler state %s", buf);
+		return -EINVAL;
+	}
+
+	return (ssize_t)count;
+}
+
+static const struct file_operations kbasep_csf_debugfs_scheduler_state_fops = {
+	.owner = THIS_MODULE,
+	.read = kbase_csf_debugfs_scheduler_state_get,
+	.write = kbase_csf_debugfs_scheduler_state_set,
+	.open = simple_open,
+	.llseek = default_llseek,
+};
+static int kbasep_csf_debugfs_eviction_timeout_get(void *data, u64 *val)
+{
+	struct kbase_device *const kbdev = data;
+	unsigned long flags;
+
+	kbase_csf_scheduler_spin_lock(kbdev, &flags);
+	*val = kbdev->csf.csg_suspend_timeout_ms - CSG_SUSPEND_TIMEOUT_HOST_ADDED_MS;
+	kbase_csf_scheduler_spin_unlock(kbdev, flags);
 
 	return 0;
 }
 
-DEFINE_SIMPLE_ATTRIBUTE(kbasep_csf_debugfs_scheduler_suspend_fops,
-		&kbase_csf_debugfs_scheduler_suspend_get,
-		&kbase_csf_debugfs_scheduler_suspend_set,
-		"%llu\n");
+static int kbasep_csf_debugfs_eviction_timeout_set(void *data, u64 val)
+{
+	struct kbase_device *const kbdev = data;
+	unsigned long flags_schd, flags_hw;
+	u64 dur_ms = val;
+	int ret = 0;
+
+	if (unlikely(dur_ms < CSG_SUSPEND_TIMEOUT_FIRMWARE_MS_MIN ||
+		     dur_ms > CSG_SUSPEND_TIMEOUT_FIRMWARE_MS_MAX)) {
+		dev_err(kbdev->dev, "Invalid CSG suspend timeout input (%llu)", dur_ms);
+		return -EFAULT;
+	}
+	dur_ms = dur_ms + CSG_SUSPEND_TIMEOUT_HOST_ADDED_MS;
+
+	/* The 'fw_load_lock' is taken to synchronize against the deferred
+	 * loading of FW, update will take effect after firmware gets loaded.
+	 */
+	mutex_lock(&kbdev->fw_load_lock);
+	if (unlikely(!kbdev->csf.firmware_inited)) {
+		kbase_csf_scheduler_spin_lock(kbdev, &flags_schd);
+		kbdev->csf.csg_suspend_timeout_ms = (unsigned int)dur_ms;
+		kbase_csf_scheduler_spin_unlock(kbdev, flags_schd);
+		mutex_unlock(&kbdev->fw_load_lock);
+		dev_info(kbdev->dev, "CSF set csg suspend timeout deferred till fw is loaded");
+		goto end;
+	}
+	mutex_unlock(&kbdev->fw_load_lock);
+
+	/* Firmware reloading is triggered by silent reset, and then update will take effect.
+	 */
+	kbase_csf_scheduler_pm_active(kbdev);
+	if (kbase_csf_scheduler_killable_wait_mcu_active(kbdev)) {
+		dev_err(kbdev->dev,
+			"Unable to activate the MCU, the csg suspend timeout value shall remain unchanged");
+		kbase_csf_scheduler_pm_idle(kbdev);
+		ret = -EFAULT;
+		goto exit;
+	}
+	spin_lock_irqsave(&kbdev->hwaccess_lock, flags_hw);
+	if (kbase_reset_gpu_silent(kbdev)) {
+		spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags_hw);
+		dev_err(kbdev->dev, "CSF set csg suspend timeout pending reset, try again");
+		kbase_csf_scheduler_pm_idle(kbdev);
+		ret = -EFAULT;
+		goto exit;
+	}
+	/* GPU reset is placed and it will take place only after hwaccess_lock is released,
+	 * update on host side should be done after GPU reset is placed and before it takes place.
+	 */
+	kbase_csf_scheduler_spin_lock(kbdev, &flags_schd);
+	kbdev->csf.csg_suspend_timeout_ms = (unsigned int)dur_ms;
+	kbase_csf_scheduler_spin_unlock(kbdev, flags_schd);
+	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags_hw);
+	/* Keep PM active until reset finished to allow FW reloading to take place,
+	 * and then update request will be sent to FW during initialization.
+	 */
+	kbase_reset_gpu_wait(kbdev);
+	kbase_csf_scheduler_pm_idle(kbdev);
+
+end:
+	dev_info(kbdev->dev, "CSF set csg suspend timeout: %u ms", (unsigned int)dur_ms);
+
+exit:
+	return ret;
+}
+
+DEFINE_DEBUGFS_ATTRIBUTE(kbasep_csf_debugfs_eviction_timeout_fops,
+			 &kbasep_csf_debugfs_eviction_timeout_get,
+			 &kbasep_csf_debugfs_eviction_timeout_set, "%llu\n");
 
 void kbase_csf_debugfs_init(struct kbase_device *kbdev)
 {
-	debugfs_create_file("active_groups", 0444,
-		kbdev->mali_debugfs_directory, kbdev,
-		&kbasep_csf_active_queue_groups_debugfs_fops);
+	debugfs_create_file("active_groups", 0444, kbdev->mali_debugfs_directory, kbdev,
+			    &kbasep_csf_active_queue_groups_debugfs_fops);
 
-	debugfs_create_file("scheduling_timer_enabled", 0644,
-			kbdev->mali_debugfs_directory, kbdev,
-			&kbasep_csf_debugfs_scheduling_timer_enabled_fops);
-	debugfs_create_file("scheduling_timer_kick", 0200,
-			kbdev->mali_debugfs_directory, kbdev,
-			&kbasep_csf_debugfs_scheduling_timer_kick_fops);
-	debugfs_create_file("scheduler_suspend", 0644,
-			kbdev->mali_debugfs_directory, kbdev,
-			&kbasep_csf_debugfs_scheduler_suspend_fops);
+	debugfs_create_file("scheduling_timer_enabled", 0644, kbdev->mali_debugfs_directory, kbdev,
+			    &kbasep_csf_debugfs_scheduling_timer_enabled_fops);
+	debugfs_create_file("scheduling_timer_kick", 0200, kbdev->mali_debugfs_directory, kbdev,
+			    &kbasep_csf_debugfs_scheduling_timer_kick_fops);
+	debugfs_create_file("scheduler_state", 0644, kbdev->mali_debugfs_directory, kbdev,
+			    &kbasep_csf_debugfs_scheduler_state_fops);
+	debugfs_create_file("eviction_timeout_ms", 0644, kbdev->mali_debugfs_directory, kbdev,
+			    &kbasep_csf_debugfs_eviction_timeout_fops);
 
 	kbase_csf_tl_reader_debugfs_init(kbdev);
-	kbase_csf_firmware_trace_buffer_debugfs_init(kbdev);
+
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_FS)
+	mtk_common_csf_debugfs_init(kbdev);
+#endif /* CONFIG_MALI_MTK_DEBUG_FS */
 }
 
 #else

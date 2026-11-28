@@ -8,11 +8,11 @@
 #include <linux/slab.h>
 #include <platform/mtk_mfg_counter.h>
 #include <mali_kbase_gator_api.h>
-#include <string.h>
+#include <linux/string.h>
 #include <linux/math64.h>
-#if IS_ENABLED(CONFIG_MTK_GPU_SWPM_SUPPORT)
-#include <mali_kbase_vinstr.h>
-#endif
+#if IS_ENABLED(CONFIG_MALI_MTK_GPU_PMU)
+#include <mali_kbase_kinstr_prfcnt.h>
+#endif /* CONFIG_MALI_MTK_GPU_PMU */
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/uaccess.h>
@@ -38,8 +38,7 @@
 #define OFFSET_STALL_GPU_M1_WR_CNT	0x208
 #define OFFSET_STALL_GPU_M1_RD_CNT	0x20c
 
-
-static DEFINE_MUTEX(counter_info_lock);
+static DEFINE_SPINLOCK(counter_info_lock);
 
 static const char *const *hardware_counter_names;
 static int number_of_hardware_counters;
@@ -465,7 +464,6 @@ static void _mtk_mfg_init_counter(void)
 	if ((hardware_counter_names == NULL) || (cnt <= 0)) {
 		return;
 	}
-
 	/* Default doesn't enable all HWC */
 	info.bitmask[0] = 0x157; /* JM */
 	info.bitmask[1] = 0x2; /* Tiler */
@@ -473,7 +471,6 @@ static void _mtk_mfg_init_counter(void)
 	info.bitmask[3] = 0x1FCF; /* L2 & MMU */
 	handle = kbase_gator_hwcnt_init(&info);
 	if (!handle) {
-		pr_info("[PMU]Error init hwcnt\n");
 		return;
 	}
 
@@ -487,7 +484,6 @@ static void _mtk_mfg_init_counter(void)
 		number_of_hardware_counters = cnt - empty_hwc_cnt + MFG_MTK_COUNTER_SIZE;
 		mali_pmus = kcalloc(number_of_hardware_counters, sizeof(struct GPU_PMU), GFP_KERNEL);
 		if (!mali_pmus) {
-			pr_info("[PMU] fail to allocate mali_pmus\n");
 			return;
 		}
 
@@ -498,19 +494,6 @@ static void _mtk_mfg_init_counter(void)
 		name_offset_table[MMU_L2_BLOCK] = MMU_BLOCK_NAME_POS;
 		mfg_is_power_on = 0;
 		binited = 1;
-		/* Dump PMU info */
-		pr_debug("[GPU pmu]bitmask[0] %x\n", info.bitmask[0]);
-		pr_debug("[GPU pmu]bitmask[1] %x\n", info.bitmask[1]);
-		pr_debug("[GPU pmu]bitmask[2] %x\n", info.bitmask[2]);
-		pr_debug("[GPU pmu]bitmask[3] %x\n", info.bitmask[3]);
-		pr_debug("[GPU pmu]gpu_id %d\n", info.gpu_id);
-		pr_debug("[GPU pmu]nr_cores %d\n", info.nr_cores);
-		pr_debug("[GPU pmu]nr_core_groups %d\n", info.nr_core_groups);
-		pr_debug("[GPU pmu]nr_hwc_blocks %d\n", info.nr_hwc_blocks);
-		for (i = 0; i < info.nr_hwc_blocks; i++)
-			pr_debug("[GPU pmu]hwc_layout[%d] %d\n", i, info.hwc_layout[i]);
-
-		pr_debug("[GPU pmu]num_of_counter %d\n", number_of_hardware_counters);
 		kbase_gator_instr_hwcnt_dump_irq(handle);
 	}
 }
@@ -530,7 +513,7 @@ static int _mtk_mfg_update_counter(void)
 	}
 
 	if (ret != PMU_NG) {
-		u32 *hwcnt_data = (u32 *)info.kernel_dump_buffer;
+		u64 *hwcnt_data = (u64 *)info.kernel_dump_buffer;
 		int shader_block, block_type, i, j, name_offset, data_offset, cnt, nr_hwc_blocks;
 
 		nr_hwc_blocks = info.nr_hwc_blocks ;
@@ -569,15 +552,6 @@ static int _mtk_mfg_update_counter(void)
 						goto FINISH;
 					}
 				}
-				/* DEBUG */
-				/*
-				if (mali_pmus[cnt].name && (strstr(mali_pmus[cnt].name, "GPU_ACTIVE")
-				|| strstr(mali_pmus[cnt].name, "EXEC_ACTIVE")
-				|| strstr(mali_pmus[cnt].name, "FRAG_ACTIVE")))
-					pr_debug("[PMU]id %d name %s value %d time %llu gpu_freq %d active_cycle %d\n",
-					cnt, mali_pmus[cnt].name, mali_pmus[cnt].value, timd_diff_us,
-					gpu_freq, active_cycle)
-				*/
 				cnt++;
 			}
 		}
@@ -619,11 +593,11 @@ static int mali_get_gpu_pmu_init(struct GPU_PMU *pmus, int pmu_size, int *ret_si
 		int i, j, cnt, block_type;
 		int nr_hwc_blocks, name_offset, data_offset;
 
-		mutex_lock(&counter_info_lock);
-#if IS_ENABLED(CONFIG_MTK_GPU_SWPM_SUPPORT)
+		spin_lock(&counter_info_lock);
+#if IS_ENABLED(CONFIG_MALI_MTK_GPU_PMU)
 		if (MTK_get_mtk_pm() != pm_non)
 			MTK_kbasep_vinstr_hwcnt_set_interval(0);
-#endif
+#endif /* CONFIG_MALI_MTK_GPU_PMU */
 		cnt = block_type = 0;
 		nr_hwc_blocks = info.nr_hwc_blocks;
 		for (i = 0; i < nr_hwc_blocks; i++) {
@@ -652,15 +626,15 @@ static int mali_get_gpu_pmu_init(struct GPU_PMU *pmus, int pmu_size, int *ret_si
 			mali_pmus[cnt].name = mfg_mtk_counters[i].name;
 			cnt++;
 		}
-		mutex_unlock(&counter_info_lock);
+		spin_unlock(&counter_info_lock);
 	}
 
 	if (ret_size) {
-		mutex_lock(&counter_info_lock);
+		spin_lock(&counter_info_lock);
 
 		*ret_size = number_of_hardware_counters;
 
-		mutex_unlock(&counter_info_lock);
+		spin_unlock(&counter_info_lock);
 	}
 
 	return ret;
@@ -671,12 +645,11 @@ static int mali_get_gpu_pmu_swapnreset(struct GPU_PMU *pmus, int pmu_size)
 	int i, ret;
 
 	ret = PMU_OK;
-	if (!binited) {
-		pr_info("[PMU] not inited, call mtk_get_gpu_pmu_init first\n");
+	if (!binited)
 		return PMU_NG;
-	}
+
 	if (pmus) {
-		mutex_lock(&counter_info_lock);
+		spin_lock(&counter_info_lock);
 
 		/* update if gpu power on */
 		if (1) {
@@ -695,7 +668,7 @@ static int mali_get_gpu_pmu_swapnreset(struct GPU_PMU *pmus, int pmu_size)
 			}
 		}
 
-		mutex_unlock(&counter_info_lock);
+		spin_unlock(&counter_info_lock);
 	}
 
 	return ret;
@@ -703,16 +676,15 @@ static int mali_get_gpu_pmu_swapnreset(struct GPU_PMU *pmus, int pmu_size)
 
 static int mali_get_gpu_pmu_swapnreset_stop(void)
 {
-	if (!binited) {
-		pr_info("[PMU] not inited, call mtk_get_gpu_pmu_init first\n");
+	if (!binited)
 		return PMU_NG;
-	}
-	mutex_lock(&counter_info_lock);
+
+	spin_lock(&counter_info_lock);
 
 	kbase_gator_hwcnt_term(&info, handle);
 	kbase_gator_hwcnt_term_names();
 
-	mutex_unlock(&counter_info_lock);
+	spin_unlock(&counter_info_lock);
 
 	return PMU_OK;
 }
@@ -724,18 +696,18 @@ int mali_get_gpu_pmu_deinit(void)
 		return PMU_NG;
 	}
 
-	mutex_lock(&counter_info_lock);
+	spin_lock(&counter_info_lock);
 
 	kfree(mali_pmus);
 	binited = 0;
 	mfg_is_power_on = 0;
-#if IS_ENABLED(CONFIG_MTK_GPU_SWPM_SUPPORT)
+#if IS_ENABLED(CONFIG_MALI_MTK_GPU_PMU)
 	if (MTK_get_mtk_pm() == pm_ltr)
 		MTK_kbasep_vinstr_hwcnt_set_interval(8000000);
 	else if (MTK_get_mtk_pm() == pm_swpm)
 		MTK_kbasep_vinstr_hwcnt_set_interval(1000000);
-#endif
-	mutex_unlock(&counter_info_lock);
+#endif /* CONFIG_MALI_MTK_GPU_PMU */
+	spin_unlock(&counter_info_lock);
 
 	return PMU_OK;
 }
@@ -765,15 +737,13 @@ int gator_gpu_pmu_init(void)
 	int ret = PMU_OK;
 	int i, j, cnt, block_type;
 	int nr_hwc_blocks, name_offset, data_offset;
-	if (!binited) {
+	if (!binited)
 		_mtk_mfg_init_counter();
-	}
+
 	cnt = block_type = 0;
 	nr_hwc_blocks = info.nr_hwc_blocks - info.nr_cores + 1;
-	pr_debug("block num:%u, core:%u", info.nr_hwc_blocks, info.nr_cores);
 	for (i = 0; i < info.nr_hwc_blocks; i++) {
 		block_type = info.hwc_layout[i];
-		pr_debug("block:%d", block_type);
 		if (block_type == RESERVED_BLOCK)
 			continue;
 		name_offset = name_offset_table[block_type] * MALI_COUNTERS_PER_BLOCK;
@@ -782,16 +752,8 @@ int gator_gpu_pmu_init(void)
 			const char *name = hardware_counter_names[name_offset + j];
 			if (name[0] == '\0')
 				continue;
-			mali_pmus[cnt].id = cnt;
-			mali_pmus[cnt].name = name;
-			pr_debug("%u:%s", data_offset + j, name);
 			cnt++;
 		}
-	}
-	for (i = 0; i < MFG_MTK_COUNTER_SIZE; i++) {
-		mali_pmus[cnt].id = cnt;
-		mali_pmus[cnt].name = mfg_mtk_counters[i].name;
-		cnt++;
 	}
 	return ret;
 }
@@ -867,4 +829,3 @@ void mtk_GPU_STALL_RAW(unsigned int *diff, int size)
 	}
 #endif
 }
-

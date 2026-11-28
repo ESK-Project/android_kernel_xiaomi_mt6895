@@ -1,7 +1,7 @@
-/* SPDX-License-Identifier: GPL-2.0 */
+/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
  *
- * (C) COPYRIGHT 2010-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2010-2024 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -27,47 +27,28 @@
 #define _UAPI_BASE_KERNEL_H_
 
 #include <linux/types.h>
-
-struct base_mem_handle {
-	struct {
-		__u64 handle;
-	} basep;
-};
-
+#include "mali_gpu_props.h"
+#include "mali_base_common_kernel.h"
 #include "mali_base_mem_priv.h"
 #include "gpu/mali_kbase_gpu_id.h"
 #include "gpu/mali_kbase_gpu_coherency.h"
 
-#define BASE_GPU_NUM_TEXTURE_FEATURES_REGISTERS 4
-
-#define BASE_MAX_COHERENT_GROUPS 16
-
-#if defined(CDBG_ASSERT)
-#define LOCAL_ASSERT CDBG_ASSERT
-#elif defined(KBASE_DEBUG_ASSERT)
-#define LOCAL_ASSERT KBASE_DEBUG_ASSERT
-#else
-#if defined(__KERNEL__)
-#error assert macro not defined!
-#else
-#define LOCAL_ASSERT(...)	((void)#__VA_ARGS__)
-#endif
-#endif
+#ifdef __KERNEL__
+#include <linux/mm.h>
 
 #if defined(PAGE_MASK) && defined(PAGE_SHIFT)
 #define LOCAL_PAGE_SHIFT PAGE_SHIFT
 #define LOCAL_PAGE_LSB ~PAGE_MASK
 #else
-#ifndef OSU_CONFIG_CPU_PAGE_SIZE_LOG2
-#define OSU_CONFIG_CPU_PAGE_SIZE_LOG2 12
+#error "Missing kernel definitions: PAGE_MASK, PAGE_SHIFT"
 #endif
 
-#if defined(OSU_CONFIG_CPU_PAGE_SIZE_LOG2)
-#define LOCAL_PAGE_SHIFT OSU_CONFIG_CPU_PAGE_SIZE_LOG2
-#define LOCAL_PAGE_LSB ((1ul << OSU_CONFIG_CPU_PAGE_SIZE_LOG2) - 1)
 #else
-#error Failed to find page size
-#endif
+
+#define LOCAL_PAGE_SHIFT (__builtin_ctz((unsigned int)sysconf(_SC_PAGESIZE)))
+
+#define LOCAL_PAGE_LSB ((1ul << LOCAL_PAGE_SHIFT) - 1)
+
 #endif
 
 /* Physical memory group ID for normal usage.
@@ -90,23 +71,25 @@ struct base_mem_handle {
  * More flags can be added to this list, as long as they don't clash
  * (see BASE_MEM_FLAGS_NR_BITS for the number of the first free bit).
  */
-typedef __u32 base_mem_alloc_flags;
+typedef __u64 base_mem_alloc_flags;
+
+#define BASE_MEM_FLAGS_MODIFIABLE_NATIVE (BASE_MEM_DONT_NEED)
+
+#define BASE_MEM_FLAGS_MODIFIABLE_IMPORTED_UMM (BASE_MEM_COHERENT_SYSTEM | BASE_MEM_COHERENT_LOCAL)
 
 /* A mask for all the flags which are modifiable via the base_mem_set_flags
  * interface.
  */
 #define BASE_MEM_FLAGS_MODIFIABLE \
-	(BASE_MEM_DONT_NEED | BASE_MEM_COHERENT_SYSTEM | \
-	 BASE_MEM_COHERENT_LOCAL)
+	(BASE_MEM_FLAGS_MODIFIABLE_NATIVE | BASE_MEM_FLAGS_MODIFIABLE_IMPORTED_UMM)
 
 /* A mask of all the flags that can be returned via the base_mem_get_flags()
  * interface.
  */
-#define BASE_MEM_FLAGS_QUERYABLE \
-	(BASE_MEM_FLAGS_INPUT_MASK & ~(BASE_MEM_SAME_VA | \
-		BASE_MEM_COHERENT_SYSTEM_REQUIRED | BASE_MEM_DONT_NEED | \
-		BASE_MEM_IMPORT_SHARED | BASE_MEM_FLAGS_RESERVED | \
-		BASEP_MEM_FLAGS_KERNEL_ONLY))
+#define BASE_MEM_FLAGS_QUERYABLE                                                               \
+	(BASE_MEM_FLAGS_INPUT_MASK &                                                           \
+	 ~(BASE_MEM_FLAGS_RESERVED | BASE_MEM_FLAGS_UNUSED | BASE_MEM_FLAGS_ACTION_MODIFIERS | \
+	   BASE_MEM_FLAGS_KERNEL_ONLY))
 
 /**
  * enum base_mem_import_type - Memory types supported by @a base_mem_import
@@ -148,22 +131,21 @@ struct base_mem_import_user_buffer {
 };
 
 /* Mask to detect 4GB boundary alignment */
-#define BASE_MEM_MASK_4GB  0xfffff000UL
+#define BASE_MEM_MASK_4GB 0xfffff000UL
 /* Mask to detect 4GB boundary (in page units) alignment */
-#define BASE_MEM_PFN_MASK_4GB  (BASE_MEM_MASK_4GB >> LOCAL_PAGE_SHIFT)
+#define BASE_MEM_PFN_MASK_4GB (BASE_MEM_MASK_4GB >> LOCAL_PAGE_SHIFT)
 
 /* Limit on the 'extension' parameter for an allocation with the
  * BASE_MEM_TILER_ALIGN_TOP flag set
  *
  * This is the same as the maximum limit for a Buffer Descriptor's chunk size
  */
-#define BASE_MEM_TILER_ALIGN_TOP_EXTENSION_MAX_PAGES_LOG2                      \
-	(21u - (LOCAL_PAGE_SHIFT))
-#define BASE_MEM_TILER_ALIGN_TOP_EXTENSION_MAX_PAGES                           \
+#define BASE_MEM_TILER_ALIGN_TOP_EXTENSION_MAX_PAGES_LOG2 (21u - (LOCAL_PAGE_SHIFT))
+#define BASE_MEM_TILER_ALIGN_TOP_EXTENSION_MAX_PAGES \
 	(1ull << (BASE_MEM_TILER_ALIGN_TOP_EXTENSION_MAX_PAGES_LOG2))
 
-/* Bit mask of cookies used for for memory allocation setup */
-#define KBASE_COOKIE_MASK  ~1UL /* bit 0 is reserved */
+/* Bit mask of cookies used for memory allocation setup */
+#define KBASE_COOKIE_MASK ~1UL /* bit 0 is reserved */
 
 /* Maximum size allowed in a single KBASE_IOCTL_MEM_ALLOC call */
 #define KBASE_MEM_ALLOC_MAX_SIZE ((8ull << 30) >> PAGE_SHIFT) /* 8 GB */
@@ -185,26 +167,27 @@ struct base_fence {
 /**
  * struct base_mem_aliasing_info - Memory aliasing info
  *
- * Describes a memory handle to be aliased.
- * A subset of the handle can be chosen for aliasing, given an offset and a
+ * @gpu_va: GPU VA of an allocation to be aliased, can be a special value
+ *          BASEP_MEM_WRITE_ALLOC_PAGES_HANDLE
+ * @offset: Offset within the allocation to start aliasing from, in pages.
+ *          Not used with BASEP_MEM_WRITE_ALLOC_PAGES_HANDLE.
+ * @length: Length to alias, in pages. For BASEP_MEM_WRITE_ALLOC_PAGES_HANDLE
+ *          specifies the number of times the special page is needed.
+ *
+ * Describes a GPU memory allocation to be aliased.
+ * A subset of the allocation can be chosen for aliasing, given an offset and a
  * length.
- * A special handle BASE_MEM_WRITE_ALLOC_PAGES_HANDLE is used to represent a
+ * A special value BASEP_MEM_WRITE_ALLOC_PAGES_HANDLE is used to represent a
  * region where a special page is mapped with a write-alloc cache setup,
  * typically used when the write result of the GPU isn't needed, but the GPU
  * must write anyway.
  *
  * Offset and length are specified in pages.
- * Offset must be within the size of the handle.
- * Offset+length must not overrun the size of the handle.
- *
- * @handle: Handle to alias, can be BASE_MEM_WRITE_ALLOC_PAGES_HANDLE
- * @offset: Offset within the handle to start aliasing from, in pages.
- *          Not used with BASE_MEM_WRITE_ALLOC_PAGES_HANDLE.
- * @length: Length to alias, in pages. For BASE_MEM_WRITE_ALLOC_PAGES_HANDLE
- *          specifies the number of times the special page is needed.
+ * Offset must be within the size of the allocation.
+ * Offset+length must not overrun the size of the allocation.
  */
 struct base_mem_aliasing_info {
-	struct base_mem_handle handle;
+	__u64 gpu_va;
 	__u64 offset;
 	__u64 length;
 };
@@ -217,55 +200,6 @@ struct base_mem_aliasing_info {
 /* Maximum number of concurrent just-in-time memory allocations.
  */
 #define BASE_JIT_ALLOC_COUNT (255)
-
-/* base_jit_alloc_info in use for kernel driver versions 10.2 to early 11.5
- *
- * jit_version is 1
- *
- * Due to the lack of padding specified, user clients between 32 and 64-bit
- * may have assumed a different size of the struct
- *
- * An array of structures was not supported
- */
-struct base_jit_alloc_info_10_2 {
-	__u64 gpu_alloc_addr;
-	__u64 va_pages;
-	__u64 commit_pages;
-	__u64 extension;
-	__u8 id;
-};
-
-/* base_jit_alloc_info introduced by kernel driver version 11.5, and in use up
- * to 11.19
- *
- * This structure had a number of modifications during and after kernel driver
- * version 11.5, but remains size-compatible throughout its version history, and
- * with earlier variants compatible with future variants by requiring
- * zero-initialization to the unused space in the structure.
- *
- * jit_version is 2
- *
- * Kernel driver version history:
- * 11.5: Initial introduction with 'usage_id' and padding[5]. All padding bytes
- *       must be zero. Kbase minor version was not incremented, so some
- *       versions of 11.5 do not have this change.
- * 11.5: Added 'bin_id' and 'max_allocations', replacing 2 padding bytes (Kbase
- *       minor version not incremented)
- * 11.6: Added 'flags', replacing 1 padding byte
- * 11.10: Arrays of this structure are supported
- */
-struct base_jit_alloc_info_11_5 {
-	__u64 gpu_alloc_addr;
-	__u64 va_pages;
-	__u64 commit_pages;
-	__u64 extension;
-	__u8 id;
-	__u8 bin_id;
-	__u8 max_allocations;
-	__u8 flags;
-	__u8 padding[2];
-	__u16 usage_id;
-};
 
 /**
  * struct base_jit_alloc_info - Structure which describes a JIT allocation
@@ -296,16 +230,6 @@ struct base_jit_alloc_info_11_5 {
  * @heap_info_gpu_addr:         Pointer to an object in GPU memory describing
  *                              the actual usage of the region.
  *
- * jit_version is 3.
- *
- * When modifications are made to this structure, it is still compatible with
- * jit_version 3 when: a) the size is unchanged, and b) new members only
- * replace the padding bytes.
- *
- * Previous jit_version history:
- * jit_version == 1, refer to &base_jit_alloc_info_10_2
- * jit_version == 2, refer to &base_jit_alloc_info_11_5
- *
  * Kbase version history:
  * 11.20: added @heap_info_gpu_addr
  */
@@ -323,19 +247,15 @@ struct base_jit_alloc_info {
 	__u64 heap_info_gpu_addr;
 };
 
-enum base_external_resource_access {
-	BASE_EXT_RES_ACCESS_SHARED,
-	BASE_EXT_RES_ACCESS_EXCLUSIVE
-};
+enum base_external_resource_access { BASE_EXT_RES_ACCESS_SHARED, BASE_EXT_RES_ACCESS_EXCLUSIVE };
 
 struct base_external_resource {
 	__u64 ext_resource;
 };
 
-
 /**
- * The maximum number of external resources which can be mapped/unmapped
- * in a single request.
+ * BASE_EXT_RES_COUNT_MAX - The maximum number of external resources
+ * which can be mapped/unmapped in a single request.
  */
 #define BASE_EXT_RES_COUNT_MAX 10
 
@@ -357,10 +277,8 @@ struct base_jd_debug_copy_buffer {
 	struct base_external_resource extres;
 };
 
-#define GPU_MAX_JOB_SLOTS 16
-
 /**
- * User-side Base GPU Property Queries
+ * DOC: User-side Base GPU Property Queries
  *
  * The User-side Base GPU Property Query interface encapsulates two
  * sub-modules:
@@ -471,51 +389,6 @@ struct base_jd_debug_copy_buffer {
  * 16 coherent groups, since core groups are typically 4 cores.
  */
 
-#define BASE_GPU_NUM_TEXTURE_FEATURES_REGISTERS 4
-
-#define BASE_MAX_COHERENT_GROUPS 16
-/**
- * struct mali_base_gpu_core_props - GPU core props info
- * @product_id: Pro specific value.
- * @version_status: Status of the GPU release. No defined values, but starts at
- * 	0 and increases by one for each release status (alpha, beta, EAC, etc.).
- * 	4 bit values (0-15).
- * @minor_revision: Minor release number of the GPU. "P" part of an "RnPn"
- * 	release number.
- * 	8 bit values (0-255).
- * @major_revision: Major release number of the GPU. "R" part of an "RnPn"
- * 	release number.
- * 	4 bit values (0-15).
- * @padding: padding to allign to 8-byte
- * @gpu_freq_khz_max: The maximum GPU frequency. Reported to applications by
- * 	clGetDeviceInfo()
- * @log2_program_counter_size: Size of the shader program counter, in bits.
- * @texture_features: TEXTURE_FEATURES_x registers, as exposed by the GPU. This
- * 	is a bitpattern where a set bit indicates that the format is supported.
- * 	Before using a texture format, it is recommended that the corresponding
- * 	bit be checked.
- * @gpu_available_memory_size: Theoretical maximum memory available to the GPU.
- * 	It is unlikely that a client will be able to allocate all of this memory
- * 	for their own purposes, but this at least provides an upper bound on the
- * 	memory available to the GPU.
- * 	This is required for OpenCL's clGetDeviceInfo() call when
- * 	CL_DEVICE_GLOBAL_MEM_SIZE is requested, for OpenCL GPU devices. The
- * 	client will not be expecting to allocate anywhere near this value.
- * @num_exec_engines: The number of execution engines.
- */
-struct mali_base_gpu_core_props {
-	__u32 product_id;
-	__u16 version_status;
-	__u16 minor_revision;
-	__u16 major_revision;
-	__u16 padding;
-	__u32 gpu_freq_khz_max;
-	__u32 log2_program_counter_size;
-	__u32 texture_features[BASE_GPU_NUM_TEXTURE_FEATURES_REGISTERS];
-	__u64 gpu_available_memory_size;
-	__u8 num_exec_engines;
-};
-
 /*
  * More information is possible - but associativity and bus width are not
  * required by upper-level apis.
@@ -528,8 +401,8 @@ struct mali_base_gpu_l2_cache_props {
 };
 
 struct mali_base_gpu_tiler_props {
-	__u32 bin_size_bytes;	/* Max is 4*2^15 */
-	__u32 max_active_levels;	/* Max is 2^15 */
+	__u32 bin_size_bytes; /* Max is 4*2^15 */
+	__u32 max_active_levels; /* Max is 2^15 */
 };
 
 /**
@@ -545,8 +418,9 @@ struct mali_base_gpu_tiler_props {
  * @max_thread_group_split: Max. allowed value [1..15] of the Thread Group Split
  *                          field.
  * @impl_tech:              0 = Not specified, 1 = Silicon, 2 = FPGA,
- *                          3 = SW Model/Emulation
- * @padding:                padding to allign to 8-byte
+ *                          3 = SW Model/Emulation,
+ *                          U8_MAX (255) = NO_MALI, not in spec
+ * @padding:                padding to align to 8-byte
  * @tls_alloc:              Number of threads per core that TLS must be
  *                          allocated for
  */
@@ -554,11 +428,11 @@ struct mali_base_gpu_thread_props {
 	__u32 max_threads;
 	__u32 max_workgroup_size;
 	__u32 max_barrier_size;
-	__u16 max_registers;
+	__u32 max_registers;
 	__u8 max_task_queue;
 	__u8 max_thread_group_split;
 	__u8 impl_tech;
-	__u8  padding[3];
+	__u8 padding;
 	__u32 tls_alloc;
 };
 
@@ -566,16 +440,16 @@ struct mali_base_gpu_thread_props {
  * struct mali_base_gpu_coherent_group - descriptor for a coherent group
  * @core_mask: Core restriction mask required for the group
  * @num_cores: Number of cores in the group
- * @padding:   padding to allign to 8-byte
+ * @padding:   padding to align to 8-byte
  *
  * \c core_mask exposes all cores in that coherent group, and \c num_cores
- * 	provides a cached population-count for that mask.
+ * provides a cached population-count for that mask.
  *
  * @note Whilst all cores are exposed in the mask, not all may be available to
- * 	the application, depending on the Kernel Power policy.
+ *       the application, depending on the Kernel Power policy.
  *
  * @note if u64s must be 8-byte aligned, then this structure has 32-bits of
- * 	wastage.
+ *       wastage.
  */
 struct mali_base_gpu_coherent_group {
 	__u64 core_mask;
@@ -587,15 +461,16 @@ struct mali_base_gpu_coherent_group {
  * struct mali_base_gpu_coherent_group_info - Coherency group information
  * @num_groups: Number of coherent groups in the GPU.
  * @num_core_groups: Number of core groups (coherent or not) in the GPU.
- * 	Equivalent to the number of L2 Caches.
- * 	  The GPU Counter dumping writes 2048 bytes per core group, regardless
- * 	of whether the core groups are coherent or not. Hence this member is
- * 	needed to calculate how much memory is required for dumping.
- * 	  @note Do not use it to work out how many valid elements are in the
- * 	group[] member. Use num_groups instead.
+ *                   Equivalent to the number of L2 Caches.
+ *                   The GPU Counter dumping writes 2048 bytes per core group,
+ *                   regardless of whether the core groups are coherent or not.
+ *                   Hence this member is needed to calculate how much memory
+ *                   is required for dumping.
+ *                   @note Do not use it to work out how many valid elements
+ *                         are in the group[] member. Use num_groups instead.
  * @coherency: Coherency features of the memory, accessed by gpu_mem_features
- * 	methods
- * @padding: padding to allign to 8-byte
+ *             methods
+ * @padding: padding to align to 8-byte
  * @group: Descriptors of coherent groups
  *
  * Note that the sizes of the members could be reduced. However, the \c group
@@ -612,6 +487,8 @@ struct mali_base_gpu_coherent_group_info {
 	__u32 padding;
 	struct mali_base_gpu_coherent_group group[BASE_MAX_COHERENT_GROUPS];
 };
+
+#include "csf/mali_base_csf_kernel.h"
 
 /**
  * struct gpu_raw_gpu_props - A complete description of the GPU's Hardware
@@ -635,9 +512,11 @@ struct mali_base_gpu_coherent_group_info {
  * @thread_max_barrier_size: Maximum number of threads per barrier
  * @thread_features: Thread features
  * @coherency_mode: Note: This is the _selected_ coherency mode rather than the
- * 	available modes as exposed in the coherency_features register
+ *                  available modes as exposed in the coherency_features register
  * @thread_tls_alloc: Number of threads per core that TLS must be allocated for
  * @gpu_features: GPU features
+ * @neural_present: Neural engine present bitmap
+ * @base_present: Shader core base present bitmap
  *
  * The information is presented inefficiently for access. For frequent access,
  * the values should be better expressed in an unpacked form in the
@@ -660,16 +539,12 @@ struct gpu_raw_gpu_props {
 	__u32 core_features;
 	__u32 mem_features;
 	__u32 mmu_features;
-
 	__u32 as_present;
-
 	__u32 js_present;
 	__u32 js_features[GPU_MAX_JOB_SLOTS];
 	__u32 tiler_features;
 	__u32 texture_features[BASE_GPU_NUM_TEXTURE_FEATURES_REGISTERS];
-
 	__u32 gpu_id;
-
 	__u32 thread_max_threads;
 	__u32 thread_max_workgroup_size;
 	__u32 thread_max_barrier_size;
@@ -683,6 +558,8 @@ struct gpu_raw_gpu_props {
 
 	__u32 thread_tls_alloc;
 	__u64 gpu_features;
+	__u64 neural_present;
+	__u64 base_present;
 };
 
 /**
@@ -699,7 +576,7 @@ struct gpu_raw_gpu_props {
  * values from which the value of the other members are derived. The derived
  * members exist to allow for efficient access and/or shielding the details
  * of the layout of the registers.
- * */
+ */
 struct base_gpu_props {
 	struct mali_base_gpu_core_props core_props;
 	struct mali_base_gpu_l2_cache_props l2_props;
@@ -710,88 +587,20 @@ struct base_gpu_props {
 	struct mali_base_gpu_coherent_group_info coherency_info;
 };
 
-#if MALI_USE_CSF
-#include "csf/mali_base_csf_kernel.h"
-#else
-#include "jm/mali_base_jm_kernel.h"
-#endif
+#define BASE_MEM_GROUP_ID_GET(flags) ((flags & BASE_MEM_GROUP_ID_MASK) >> BASEP_MEM_GROUP_ID_SHIFT)
 
-/**
- * base_mem_group_id_get() - Get group ID from flags
- * @flags: Flags to pass to base_mem_alloc
- *
- * This inline function extracts the encoded group ID from flags
- * and converts it into numeric value (0~15).
- *
- * Return: group ID(0~15) extracted from the parameter
- */
-static __inline__ int base_mem_group_id_get(base_mem_alloc_flags flags)
-{
-	LOCAL_ASSERT((flags & ~BASE_MEM_FLAGS_INPUT_MASK) == 0);
-	return (int)((flags & BASE_MEM_GROUP_ID_MASK) >>
-			BASEP_MEM_GROUP_ID_SHIFT);
-}
+#define BASE_MEM_GROUP_ID_SET(id)                                                                  \
+	(((base_mem_alloc_flags)((id < 0 || id >= BASE_MEM_GROUP_COUNT) ? BASE_MEM_GROUP_DEFAULT : \
+										id)                      \
+	  << BASEP_MEM_GROUP_ID_SHIFT) &                                                           \
+	 BASE_MEM_GROUP_ID_MASK)
 
-/**
- * base_mem_group_id_set() - Set group ID into base_mem_alloc_flags
- * @id: group ID(0~15) you want to encode
- *
- * This inline function encodes specific group ID into base_mem_alloc_flags.
- * Parameter 'id' should lie in-between 0 to 15.
- *
- * Return: base_mem_alloc_flags with the group ID (id) encoded
- *
- * The return value can be combined with other flags against base_mem_alloc
- * to identify a specific memory group.
- */
-static __inline__ base_mem_alloc_flags base_mem_group_id_set(int id)
-{
-	if ((id < 0) || (id >= BASE_MEM_GROUP_COUNT)) {
-		/* Set to default value when id is out of range. */
-		id = BASE_MEM_GROUP_DEFAULT;
-	}
+#define BASE_CONTEXT_MMU_GROUP_ID_SET(group_id) \
+	(BASEP_CONTEXT_MMU_GROUP_ID_MASK &      \
+	 ((base_context_create_flags)(group_id) << BASEP_CONTEXT_MMU_GROUP_ID_SHIFT))
 
-	return ((base_mem_alloc_flags)id << BASEP_MEM_GROUP_ID_SHIFT) &
-		BASE_MEM_GROUP_ID_MASK;
-}
-
-/**
- * base_context_mmu_group_id_set - Encode a memory group ID in
- *                                 base_context_create_flags
- *
- * Memory allocated for GPU page tables will come from the specified group.
- *
- * @group_id: Physical memory group ID. Range is 0..(BASE_MEM_GROUP_COUNT-1).
- *
- * Return: Bitmask of flags to pass to base_context_init.
- */
-static __inline__ base_context_create_flags base_context_mmu_group_id_set(
-	int const group_id)
-{
-	LOCAL_ASSERT(group_id >= 0);
-	LOCAL_ASSERT(group_id < BASE_MEM_GROUP_COUNT);
-	return BASEP_CONTEXT_MMU_GROUP_ID_MASK &
-		((base_context_create_flags)group_id <<
-		BASEP_CONTEXT_MMU_GROUP_ID_SHIFT);
-}
-
-/**
- * base_context_mmu_group_id_get - Decode a memory group ID from
- *                                 base_context_create_flags
- *
- * Memory allocated for GPU page tables will come from the returned group.
- *
- * @flags: Bitmask of flags to pass to base_context_init.
- *
- * Return: Physical memory group ID. Valid range is 0..(BASE_MEM_GROUP_COUNT-1).
- */
-static __inline__ int base_context_mmu_group_id_get(
-	base_context_create_flags const flags)
-{
-	LOCAL_ASSERT(flags == (flags & BASEP_CONTEXT_CREATE_ALLOWED_FLAGS));
-	return (int)((flags & BASEP_CONTEXT_MMU_GROUP_ID_MASK) >>
-			BASEP_CONTEXT_MMU_GROUP_ID_SHIFT);
-}
+#define BASE_CONTEXT_MMU_GROUP_ID_GET(flags) \
+	((flags & BASEP_CONTEXT_MMU_GROUP_ID_MASK) >> BASEP_CONTEXT_MMU_GROUP_ID_SHIFT)
 
 /*
  * A number of bit flags are defined for requesting cpu_gpu_timeinfo. These
@@ -800,31 +609,34 @@ static __inline__ int base_context_mmu_group_id_get(
  */
 
 /* For monotonic (counter) timefield */
-#define BASE_TIMEINFO_MONOTONIC_FLAG (1UL << 0)
+#define BASE_TIMEINFO_MONOTONIC_FLAG (1U << 0)
 /* For system wide timestamp */
-#define BASE_TIMEINFO_TIMESTAMP_FLAG (1UL << 1)
+#define BASE_TIMEINFO_TIMESTAMP_FLAG (1U << 1)
 /* For GPU cycle counter */
-#define BASE_TIMEINFO_CYCLE_COUNTER_FLAG (1UL << 2)
-/* Specify kernel GPU register timestamp */
-#define BASE_TIMEINFO_KERNEL_SOURCE_FLAG (1UL << 30)
-/* Specify userspace cntvct_el0 timestamp source */
-#define BASE_TIMEINFO_USER_SOURCE_FLAG (1UL << 31)
+#define BASE_TIMEINFO_CYCLE_COUNTER_FLAG (1U << 2)
 
-#define BASE_TIMEREQUEST_ALLOWED_FLAGS (\
-		BASE_TIMEINFO_MONOTONIC_FLAG | \
-		BASE_TIMEINFO_TIMESTAMP_FLAG | \
-		BASE_TIMEINFO_CYCLE_COUNTER_FLAG | \
-		BASE_TIMEINFO_KERNEL_SOURCE_FLAG | \
-		BASE_TIMEINFO_USER_SOURCE_FLAG)
+/* Specify TimeReques flags allowed if time source is cpu/gpu register */
+#define BASE_TIMEREQUEST_CPU_GPU_SRC_ALLOWED_FLAGS                     \
+	(BASE_TIMEINFO_MONOTONIC_FLAG | BASE_TIMEINFO_TIMESTAMP_FLAG | \
+	 BASE_TIMEINFO_CYCLE_COUNTER_FLAG)
 
-#define BASE_LOCAL_FENCE_WAIT_IDLE_FLAG (1UL << 0)
-#define BASE_LOCAL_FENCE_WAIT_RESULT_FLAG (1UL << 1)
-#define BASE_LOCAL_FENCE_DUMP_FLAG (1UL << 31)
+/* Specify TimeReques flags allowed if time source is system(user) space */
+#define BASE_TIMEREQUEST_SYSTEM_SRC_ALLOWED_FLAGS \
+	(BASE_TIMEINFO_MONOTONIC_FLAG | BASE_TIMEINFO_TIMESTAMP_FLAG)
 
 /* Maximum number of source allocations allowed to create an alias allocation.
  * This needs to be 4096 * 6 to allow cube map arrays with up to 4096 array
  * layers, since each cube map in the array will have 6 faces.
  */
 #define BASE_MEM_ALIAS_MAX_ENTS ((size_t)24576)
+
+/***************
+ * CONFIG_MALI_MTK_FENCE_DEBUG
+ ***************
+ * For internal fence timeouts.
+ */
+#define BASE_INTERNAL_FENCE_WAIT_IDLE_FLAG (1UL << 0)
+#define BASE_INTERNAL_FENCE_WAIT_RESULT_FLAG (1UL << 1)
+#define BASE_INTERNAL_FENCE_WAIT_DUMP_FLAG (1UL << 31)
 
 #endif /* _UAPI_BASE_KERNEL_H_ */

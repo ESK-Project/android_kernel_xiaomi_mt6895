@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 #
-# (C) COPYRIGHT 2012-2021 ARM Limited. All rights reserved.
+# (C) COPYRIGHT 2012-2025 ARM Limited. All rights reserved.
 #
 # This program is free software and is provided to you under the terms of the
 # GNU General Public License version 2 as published by the Free Software
@@ -20,10 +20,10 @@
 
 menuconfig MALI_MIDGARD
 	tristate "Mali Midgard series support"
-	select GPU_TRACEPOINTS if ANDROID
 	select DMA_SHARED_BUFFER
 	select PM_DEVFREQ
 	select DEVFREQ_THERMAL
+	select FW_LOADER
 	default n
 	help
 	  Enable this option to build support for a ARM Mali Midgard GPU.
@@ -39,20 +39,48 @@ config MALI_PLATFORM_NAME
 	default "devicetree"
 	help
 	  Enter the name of the desired platform configuration directory to
-	  include in the build. 'platform/$(MALI_PLATFORM_NAME)/Makefile' must
+	  include in the build. 'platform/$(MALI_PLATFORM_NAME)/Kbuild' must
 	  exist.
 
-config MALI_REAL_HW
+choice
+	prompt "Mali HW backend"
 	depends on MALI_MIDGARD
-	def_bool !MALI_NO_MALI
+	default MALI_REAL_HW
+
+config MALI_REAL_HW
+	bool "Enable build of Mali kernel driver for real HW"
+	depends on MALI_MIDGARD
+	help
+	  This is the default HW backend.
+
+config MALI_NO_MALI
+	bool "Enable build of Mali kernel driver for No Mali"
+	depends on MALI_MIDGARD && MALI_EXPERT
+	help
+	  This can be used to test the driver in a simulated environment
+	  whereby the hardware is not physically present. If the hardware is physically
+	  present it will not be used. This can be used to test the majority of the
+	  driver without needing actual hardware or for software benchmarking.
+	  All calls to the simulated hardware will complete immediately as if the hardware
+	  completed the task.
+
+endchoice
+
+config MALI_NO_MALI_DEFAULT_GPU
+	string "Default GPU for No Mali"
+	depends on MALI_NO_MALI
+	default "tMIx"
+	help
+	  This option sets the default GPU to identify as for No Mali builds.
 
 menu "Platform specific options"
-source "drivers/gpu/arm/midgard/platform/Kconfig"
+source "$(MALI_KCONFIG_EXT_PREFIX)drivers/gpu/arm/midgard/platform/Kconfig"
+
 endmenu
 
 config MALI_CSF_SUPPORT
 	bool "Enable Mali CSF based GPU support"
-	depends on MALI_MIDGARD=m
+	depends on MALI_MIDGARD
 	default n
 	help
 	  Enables support for CSF based GPUs.
@@ -71,7 +99,8 @@ config MALI_DEVFREQ
 
 config MALI_MIDGARD_DVFS
 	bool "Enable legacy DVFS"
-	depends on MALI_MIDGARD && !MALI_DEVFREQ
+#	depends on MALI_MIDGARD && !MALI_DEVFREQ
+	depends on MALI_MIDGARD
 	default n
 	help
 	  Choose this option to enable legacy DVFS in the Mali Midgard DDK.
@@ -93,33 +122,12 @@ config MALI_MIDGARD_ENABLE_TRACE
 	  Enables tracing in kbase. Trace log available through
 	  the "mali_trace" debugfs file, when the CONFIG_DEBUG_FS is enabled
 
-config MALI_DMA_FENCE
-	bool "Enable DMA_BUF fence support for Mali"
-	depends on MALI_MIDGARD
-	default n
-	help
-	  Support DMA_BUF fences for Mali.
-
-	  This option should only be enabled if the Linux Kernel has built in
-	  support for DMA_BUF fences.
-
-config MALI_ARBITER_SUPPORT
-	bool "Enable arbiter support for Mali"
-	depends on MALI_MIDGARD && !MALI_CSF_SUPPORT
-	default n
-	help
-	  Enable support for the arbiter interface in the driver.
-	  This allows an external arbiter to manage driver access
-	  to GPU hardware in a virtualized environment
-
-	  If unsure, say N.
-
 config MALI_DMA_BUF_MAP_ON_DEMAND
 	bool "Enable map imported dma-bufs on demand"
 	depends on MALI_MIDGARD
 	default n
 	help
-	  This option caused kbase to set up the GPU mapping of imported
+	  This option will cause kbase to set up the GPU mapping of imported
 	  dma-buf when needed to run atoms. This is the legacy behavior.
 
 	  This is intended for testing and the option will get removed in the
@@ -139,6 +147,11 @@ config MALI_DMA_BUF_LEGACY_COMPAT
 	  flushes in other drivers. This only has an effect for clients using
 	  UK 11.18 or older. For later UK versions it is not possible.
 
+config MALI_CORESIGHT
+	depends on MALI_MIDGARD && MALI_CSF_SUPPORT && !MALI_NO_MALI
+	bool "Enable Kbase CoreSight tracing support"
+	default n
+
 menuconfig MALI_EXPERT
 	depends on MALI_MIDGARD
 	bool "Enable Expert Settings"
@@ -149,26 +162,20 @@ menuconfig MALI_EXPERT
 
 if MALI_EXPERT
 
-config MALI_2MB_ALLOC
-	bool "Attempt to allocate 2MB pages"
+config LARGE_PAGE_SUPPORT
+	bool "Support for 2MB page allocations"
 	depends on MALI_MIDGARD && MALI_EXPERT
-	default n
+	default y
 	help
-	  Rather than allocating all GPU memory page-by-page, attempt to
-	  allocate 2MB pages from the kernel. This reduces TLB pressure and
-	  helps to prevent memory fragmentation.
+	 Rather than allocating all GPU memory page-by-page, allow the system
+	 to decide whether to attempt to allocate 2MB pages from the kernel.
+	 This reduces TLB pressure.
 
-	  If in doubt, say N
+	 Note that this option only enables the support for the module parameter
+	 and does not necessarily mean that 2MB pages will be used automatically.
+	 This depends on GPU support.
 
-config MALI_MEMORY_FULLY_BACKED
-	bool "Enable memory fully physically-backed"
-	depends on MALI_MIDGARD && MALI_EXPERT
-	default n
-	help
-	  This option enables full physical backing of all virtual
-	  memory allocations in the kernel. Notice that this build
-	  option only affects allocations of grow-on-GPU-page-fault
-	  memory.
+	 If in doubt, say Y.
 
 config MALI_CORESTACK
 	bool "Enable support of GPU core stack power control"
@@ -183,36 +190,6 @@ config MALI_CORESTACK
 
 	  If unsure, say N.
 
-comment "Platform options"
-	depends on MALI_MIDGARD && MALI_EXPERT
-
-config MALI_NO_MALI
-	bool "Enable No Mali"
-	depends on MALI_MIDGARD && MALI_EXPERT
-	default n
-	help
-	  This can be used to test the driver in a simulated environment
-	  whereby the hardware is not physically present. If the hardware is physically
-	  present it will not be used. This can be used to test the majority of the
-	  driver without needing actual hardware or for software benchmarking.
-	  All calls to the simulated hardware will complete immediately as if the hardware
-	  completed the task.
-
-config MALI_ERROR_INJECT
-	bool "Enable No Mali error injection"
-	depends on MALI_MIDGARD && MALI_EXPERT && MALI_NO_MALI
-	default n
-	help
-	  Enables insertion of errors to test module failure and recovery mechanisms.
-
-config MALI_GEM5_BUILD
-	bool "Enable build of Mali kernel driver for GEM5"
-	depends on MALI_MIDGARD && MALI_EXPERT
-	default n
-	help
-	  This option is to do a Mali GEM5 build.
-	  If unsure, say N.
-
 comment "Debug options"
 	depends on MALI_MIDGARD && MALI_EXPERT
 
@@ -225,7 +202,7 @@ config MALI_DEBUG
 
 config MALI_FENCE_DEBUG
 	bool "Enable debug sync fence usage"
-	depends on MALI_MIDGARD && MALI_EXPERT && (SYNC || SYNC_FILE)
+	depends on MALI_MIDGARD && MALI_EXPERT && SYNC_FILE
 	default y if MALI_DEBUG
 	help
 	  Select this option to enable additional checking and reporting on the
@@ -293,7 +270,7 @@ endchoice
 
 config MALI_PRFCNT_SET_SELECT_VIA_DEBUG_FS
 	bool "Enable runtime selection of performance counters set via debugfs"
-	depends on MALI_MIDGARD && MALI_EXPERT && DEBUG_FS
+	depends on MALI_MIDGARD && MALI_EXPERT && DEBUG_FS && !MALI_CSF_SUPPORT
 	default n
 	help
 	  Select this option to make the secondary set of performance counters
@@ -327,20 +304,8 @@ config MALI_JOB_DUMP
 comment "Workarounds"
 	depends on MALI_MIDGARD && MALI_EXPERT
 
-config MALI_PWRSOFT_765
-	bool "Enable workaround for PWRSOFT-765"
-	depends on MALI_MIDGARD && MALI_EXPERT
-	default n
-	help
-	  PWRSOFT-765 fixes devfreq cooling devices issues. The fix was merged
-	  in kernel v4.10, however if backported into the kernel then this
-	  option must be manually selected.
-
-	  If using kernel >= v4.10 then say N, otherwise if devfreq cooling
-	  changes have been backported say Y to avoid compilation errors.
-
 config MALI_HW_ERRATA_1485982_NOT_AFFECTED
-	bool "Disable workaround for BASE_HW_ISSUE_GPU2017_1336"
+	bool "Disable workaround for KBASE_HW_ISSUE_GPU2017_1336"
 	depends on MALI_MIDGARD && MALI_EXPERT
 	default n
 	help
@@ -352,7 +317,7 @@ config MALI_HW_ERRATA_1485982_NOT_AFFECTED
 	  coherency mode requires the L2 to be turned off.
 
 config MALI_HW_ERRATA_1485982_USE_CLOCK_ALTERNATIVE
-	bool "Use alternative workaround for BASE_HW_ISSUE_GPU2017_1336"
+	bool "Use alternative workaround for KBASE_HW_ISSUE_GPU2017_1336"
 	depends on MALI_MIDGARD && MALI_EXPERT && !MALI_HW_ERRATA_1485982_NOT_AFFECTED
 	default n
 	help
@@ -364,19 +329,16 @@ config MALI_HW_ERRATA_1485982_USE_CLOCK_ALTERNATIVE
 
 endif
 
-config MALI_ARBITRATION
-	bool "Enable Virtualization reference code"
+config MALI_TRACE_POWER_GPU_WORK_PERIOD
+	bool "Enable per-application GPU metrics tracepoints"
 	depends on MALI_MIDGARD
-	default n
+	default y
 	help
-	  Enables the build of several reference modules used in the reference
-	  virtualization setup for Mali
+	  This option enables per-application GPU metrics tracepoints.
+
 	  If unsure, say N.
 
-if MALI_ARBITRATION
-source "drivers/gpu/arm/midgard/arbitration/Kconfig"
-endif
 
-source "drivers/gpu/arm/midgard/tests/Kconfig"
+source "$(MALI_KCONFIG_EXT_PREFIX)drivers/gpu/arm/midgard/tests/Kconfig"
 
 endif

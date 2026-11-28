@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2020-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2020-2025 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -20,16 +20,31 @@
  */
 
 #include <mali_kbase.h>
+#include <mali_kbase_config_defaults.h>
 #include "backend/gpu/mali_kbase_clk_rate_trace_mgr.h"
 #include "mali_kbase_csf_ipa_control.h"
+#include <mali_kbase_io.h>
+#include <platform/mtk_platform_utils.h> /* MTK_INLINE */
+#include <mtk_gpufreq.h>
+#include <mtk_ddk_define.h>  /* MTK_INLINE */
+
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
+	IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
 #include "mali_kbase_csf_ipa_control_ex.h"
+extern void MTKGPUFreq_change_notify(u32 clk_idx, u32 gpufreq);
+#if IS_ENABLED(CONFIG_MALI_MTK_GPU_DVFS_HINT_26M_LOADING)
+#include "platform/mtk_platform_common/mtk_platform_dvfs_hint_26m_perf_cnting.h"
+#include "platform/mtk_platform_common/mtk_platform_dvfs_hint_26m_perf_cnting_ex.h"
+#endif /* CONFIG_MALI_MTK_GPU_DVFS_HINT_26M_LOADING */
+#if IS_ENABLED(CONFIG_MALI_MTK_GPU_DVFS_READ_SOC_TIMER)
+#include <platform/mtk_platform_common.h>
+#endif /* CONFIG_MALI_MTK_GPU_DVFS_READ_SOC_TIMER */
+#endif
 
 /*
  * Status flags from the STATUS register of the IPA Control interface.
  */
 #define STATUS_COMMAND_ACTIVE ((u32)1 << 0)
-#define STATUS_TIMER_ACTIVE ((u32)1 << 1)
-#define STATUS_AUTO_ACTIVE ((u32)1 << 2)
 #define STATUS_PROTECTED_MODE ((u32)1 << 8)
 #define STATUS_RESET ((u32)1 << 9)
 #define STATUS_TIMER_ENABLED ((u32)1 << 31)
@@ -37,63 +52,54 @@
 /*
  * Commands for the COMMAND register of the IPA Control interface.
  */
-#define COMMAND_NOP ((u32)0)
 #define COMMAND_APPLY ((u32)1)
-#define COMMAND_CLEAR ((u32)2)
 #define COMMAND_SAMPLE ((u32)3)
 #define COMMAND_PROTECTED_ACK ((u32)4)
 #define COMMAND_RESET_ACK ((u32)5)
 
-/**
- * Default value for the TIMER register of the IPA Control interface,
- * expressed in milliseconds.
- *
- * The chosen value is a trade off between two requirements: the IPA Control
- * interface should sample counters with a resolution in the order of
- * milliseconds, while keeping GPU overhead as limited as possible.
- */
-#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
-		IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
-#define TIMER_DEFAULT_VALUE_MS ((u32)1) /* 1 milliseconds */
-#else
-#define TIMER_DEFAULT_VALUE_MS ((u32)10) /* 10 milliseconds */
-#endif
-
-/**
+/*
  * Number of timer events per second.
  */
 #if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
-		IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
-#define TIMER_EVENTS_PER_SECOND ((u32)6000 / TIMER_DEFAULT_VALUE_MS)
+	IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
+#define TIMER_EVENTS_PER_SECOND ((u32)6000 / IPA_CONTROL_TIMER_DEFAULT_VALUE_MS)
 #else
-#define TIMER_EVENTS_PER_SECOND ((u32)1000 / TIMER_DEFAULT_VALUE_MS)
-#endif
+#define TIMER_EVENTS_PER_SECOND ((u32)1000 / IPA_CONTROL_TIMER_DEFAULT_VALUE_MS)
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY */
 
-/**
- * Maximum number of loops polling the GPU before we assume the GPU has hung.
- */
-#define IPA_INACTIVE_MAX_LOOPS ((unsigned int)8000000)
-
-/**
+/*
  * Number of bits used to configure a performance counter in SELECT registers.
  */
 #define IPA_CONTROL_SELECT_BITS_PER_CNT ((u64)8)
 
-/**
+/*
+ * Maximum number of bits of a performance counter.
+ */
+#define MAX_PRFCNT_BITS ((u64)48)
+
+/*
  * Maximum value of a performance counter.
  */
-#define MAX_PRFCNT_VALUE (((u64)1 << 48) - 1)
+#define MAX_PRFCNT_VALUE (((u64)1 << MAX_PRFCNT_BITS) - 1)
+#define MAX_PRFCNT_VALUE_WRAP (MAX_PRFCNT_VALUE + 1)
 
 /**
  * struct kbase_ipa_control_listener_data - Data for the GPU clock frequency
  *                                          listener
  *
- * @listener: GPU clock frequency listener.
- * @kbdev:    Pointer to kbase device.
+ * @listener:     GPU clock frequency listener.
+ * @kbdev:        Pointer to kbase device.
+ * @clk_chg_wq:   Dedicated workqueue to process the work item corresponding to
+ *                a clock rate notification.
+ * @clk_chg_work: Work item to process the clock rate change
+ * @rate:         The latest notified rate change, in unit of Hz
  */
 struct kbase_ipa_control_listener_data {
 	struct kbase_clk_rate_listener listener;
 	struct kbase_device *kbdev;
+	struct workqueue_struct *clk_chg_wq;
+	struct work_struct clk_chg_work;
+	atomic_t rate;
 };
 
 static u32 timer_value(u32 gpu_rate)
@@ -103,16 +109,16 @@ static u32 timer_value(u32 gpu_rate)
 
 static int wait_status(struct kbase_device *kbdev, u32 flags)
 {
-	unsigned int max_loops = IPA_INACTIVE_MAX_LOOPS;
-	u32 status = kbase_reg_read(kbdev, IPA_CONTROL_REG(STATUS));
-
+	u32 val;
+	const u32 timeout_us = kbase_get_timeout_ms(kbdev, IPA_INACTIVE_TIMEOUT) * USEC_PER_MSEC;
 	/*
 	 * Wait for the STATUS register to indicate that flags have been
 	 * cleared, in case a transition is pending.
 	 */
-	while (--max_loops && (status & flags))
-		status = kbase_reg_read(kbdev, IPA_CONTROL_REG(STATUS));
-	if (max_loops == 0) {
+	const int err = kbase_reg_poll32_timeout(kbdev, IPA_CONTROL_ENUM(STATUS), val,
+						 !(val & flags), 0, timeout_us, false);
+
+	if (err) {
 		dev_err(kbdev->dev, "IPA_CONTROL STATUS register stuck");
 		return -EBUSY;
 	}
@@ -124,41 +130,20 @@ static int apply_select_config(struct kbase_device *kbdev, u64 *select)
 {
 	int ret;
 
-	u32 select_cshw_lo = (u32)(select[KBASE_IPA_CORE_TYPE_CSHW] & U32_MAX);
-	u32 select_cshw_hi =
-		(u32)((select[KBASE_IPA_CORE_TYPE_CSHW] >> 32) & U32_MAX);
-	u32 select_memsys_lo =
-		(u32)(select[KBASE_IPA_CORE_TYPE_MEMSYS] & U32_MAX);
-	u32 select_memsys_hi =
-		(u32)((select[KBASE_IPA_CORE_TYPE_MEMSYS] >> 32) & U32_MAX);
-	u32 select_tiler_lo =
-		(u32)(select[KBASE_IPA_CORE_TYPE_TILER] & U32_MAX);
-	u32 select_tiler_hi =
-		(u32)((select[KBASE_IPA_CORE_TYPE_TILER] >> 32) & U32_MAX);
-	u32 select_shader_lo =
-		(u32)(select[KBASE_IPA_CORE_TYPE_SHADER] & U32_MAX);
-	u32 select_shader_hi =
-		(u32)((select[KBASE_IPA_CORE_TYPE_SHADER] >> 32) & U32_MAX);
-
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(SELECT_CSHW_LO), select_cshw_lo);
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(SELECT_CSHW_HI), select_cshw_hi);
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(SELECT_MEMSYS_LO),
-			select_memsys_lo);
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(SELECT_MEMSYS_HI),
-			select_memsys_hi);
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(SELECT_TILER_LO),
-			select_tiler_lo);
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(SELECT_TILER_HI),
-			select_tiler_hi);
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(SELECT_SHADER_LO),
-			select_shader_lo);
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(SELECT_SHADER_HI),
-			select_shader_hi);
+	kbase_reg_write64(kbdev, IPA_CONTROL_ENUM(SELECT_CSHW), select[KBASE_IPA_CORE_TYPE_CSHW]);
+	kbase_reg_write64(kbdev, IPA_CONTROL_ENUM(SELECT_MEMSYS),
+			  select[KBASE_IPA_CORE_TYPE_MEMSYS]);
+	kbase_reg_write64(kbdev, IPA_CONTROL_ENUM(SELECT_TILER), select[KBASE_IPA_CORE_TYPE_TILER]);
+	kbase_reg_write64(kbdev, IPA_CONTROL_ENUM(SELECT_SHADER),
+			  select[KBASE_IPA_CORE_TYPE_SHADER]);
+	if (kbase_csf_dev_has_ne(kbdev))
+		kbase_reg_write64(kbdev, GOV_IPA_CONTROL_ENUM(SELECT_NEURAL),
+				  select[KBASE_IPA_CORE_TYPE_NEURAL]);
 
 	ret = wait_status(kbdev, STATUS_COMMAND_ACTIVE);
 
 	if (!ret) {
-		kbase_reg_write(kbdev, IPA_CONTROL_REG(COMMAND), COMMAND_APPLY);
+		kbase_reg_write32(kbdev, IPA_CONTROL_ENUM(COMMAND), COMMAND_APPLY);
 		ret = wait_status(kbdev, STATUS_COMMAND_ACTIVE);
 	} else {
 		dev_err(kbdev->dev, "Wait for the pending command failed");
@@ -167,50 +152,32 @@ static int apply_select_config(struct kbase_device *kbdev, u64 *select)
 	return ret;
 }
 
-static u64 read_value_cnt(struct kbase_device *kbdev, u8 type, int select_idx)
+static u64 read_value_cnt(struct kbase_device *kbdev, u8 type, u8 select_idx)
 {
-	u32 value_lo, value_hi;
-
 	switch (type) {
 	case KBASE_IPA_CORE_TYPE_CSHW:
-		value_lo = kbase_reg_read(
-			kbdev, IPA_CONTROL_REG(VALUE_CSHW_REG_LO(select_idx)));
-		value_hi = kbase_reg_read(
-			kbdev, IPA_CONTROL_REG(VALUE_CSHW_REG_HI(select_idx)));
-		break;
+		return kbase_reg_read64(kbdev, IPA_VALUE_CSHW_OFFSET(select_idx));
+
 	case KBASE_IPA_CORE_TYPE_MEMSYS:
-		value_lo = kbase_reg_read(
-			kbdev,
-			IPA_CONTROL_REG(VALUE_MEMSYS_REG_LO(select_idx)));
-		value_hi = kbase_reg_read(
-			kbdev,
-			IPA_CONTROL_REG(VALUE_MEMSYS_REG_HI(select_idx)));
-		break;
+		return kbase_reg_read64(kbdev, IPA_VALUE_MEMSYS_OFFSET(select_idx));
+
 	case KBASE_IPA_CORE_TYPE_TILER:
-		value_lo = kbase_reg_read(
-			kbdev, IPA_CONTROL_REG(VALUE_TILER_REG_LO(select_idx)));
-		value_hi = kbase_reg_read(
-			kbdev, IPA_CONTROL_REG(VALUE_TILER_REG_HI(select_idx)));
-		break;
+		return kbase_reg_read64(kbdev, IPA_VALUE_TILER_OFFSET(select_idx));
+
 	case KBASE_IPA_CORE_TYPE_SHADER:
-		value_lo = kbase_reg_read(
-			kbdev,
-			IPA_CONTROL_REG(VALUE_SHADER_REG_LO(select_idx)));
-		value_hi = kbase_reg_read(
-			kbdev,
-			IPA_CONTROL_REG(VALUE_SHADER_REG_HI(select_idx)));
-		break;
+		return kbase_reg_read64(kbdev, IPA_VALUE_SHADER_OFFSET(select_idx));
+	case KBASE_IPA_CORE_TYPE_NEURAL:
+		if (kbase_csf_dev_has_ne(kbdev))
+			return kbase_reg_read64(kbdev, IPA_VALUE_NEURAL_OFFSET(select_idx));
+		else
+			return 0;
 	default:
 		WARN(1, "Unknown core type: %u\n", type);
-		value_lo = value_hi = 0;
-		break;
+		return 0;
 	}
-
-	return (((u64)value_hi << 32) | value_lo);
 }
 
-static void build_select_config(struct kbase_ipa_control *ipa_ctrl,
-				u64 *select_config)
+static void build_select_config(struct kbase_ipa_control *ipa_ctrl, u64 *select_config)
 {
 	size_t i;
 
@@ -224,8 +191,7 @@ static void build_select_config(struct kbase_ipa_control *ipa_ctrl,
 				&ipa_ctrl->blocks[i].select[j];
 
 			select_config[i] |=
-				((u64)prfcnt_config->idx
-				 << (IPA_CONTROL_SELECT_BITS_PER_CNT * j));
+				((u64)prfcnt_config->idx << (IPA_CONTROL_SELECT_BITS_PER_CNT * j));
 		}
 	}
 }
@@ -242,29 +208,52 @@ static int update_select_registers(struct kbase_device *kbdev)
 }
 
 static inline void calc_prfcnt_delta(struct kbase_device *kbdev,
-				     struct kbase_ipa_control_prfcnt *prfcnt,
-				     bool gpu_ready)
+				     struct kbase_ipa_control_prfcnt *prfcnt, bool gpu_ready)
 {
 	u64 delta_value, raw_value;
 
+	/* GPU_ACTIVE counter is always configured as counter idx 0 in SELECT_CSHW */
+	const bool gpu_active_counter =
+		(prfcnt->type == KBASE_IPA_CORE_TYPE_CSHW && prfcnt->select_idx == 0);
+
 	if (gpu_ready)
-		raw_value = read_value_cnt(kbdev, (u8)prfcnt->type,
-					   prfcnt->select_idx);
+		raw_value = read_value_cnt(kbdev, (u8)prfcnt->type, prfcnt->select_idx);
 	else
 		raw_value = prfcnt->latest_raw_value;
 
 	if (raw_value < prfcnt->latest_raw_value) {
-		delta_value = (MAX_PRFCNT_VALUE - prfcnt->latest_raw_value) +
-			      raw_value;
+		delta_value = (MAX_PRFCNT_VALUE - prfcnt->latest_raw_value) + raw_value;
+
+		if (gpu_active_counter)
+			prfcnt->gpu_active_cycle_wrap += MAX_PRFCNT_VALUE_WRAP;
 	} else {
 		delta_value = raw_value - prfcnt->latest_raw_value;
 	}
 
+	if (gpu_active_counter)
+		trace_mali_gpu_active_cycle_counter(kbdev->id, ktime_get_raw_ns(),
+						    raw_value + prfcnt->gpu_active_cycle_wrap);
+
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
+	IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
+	prfcnt->accumulated_raw_diff += delta_value;
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY */
+
 	delta_value *= prfcnt->scaling_factor;
 
-	if (kbdev->csf.ipa_control.cur_gpu_rate)
-		if (prfcnt->gpu_norm)
-			delta_value /= kbdev->csf.ipa_control.cur_gpu_rate;
+	if (kbdev->csf.ipa_control.cur_gpu_rate == 0) {
+		static bool warned;
+
+		if (!warned) {
+#if IS_ENABLED(CONFIG_MALI_MTK_PREVENT_PRINTK_TOO_MUCH)
+			dev_vdbg(kbdev->dev, "%s: GPU freq is unexpectedly 0", __func__);
+#else
+			dev_warn(kbdev->dev, "%s: GPU freq is unexpectedly 0", __func__);
+#endif /* CONFIG_MALI_MTK_PREVENT_PRINTK_TOO_MUCH */
+			warned = true;
+		}
+	} else if (prfcnt->gpu_norm)
+		delta_value = div_u64(delta_value, kbdev->csf.ipa_control.cur_gpu_rate);
 
 	prfcnt->latest_raw_value = raw_value;
 
@@ -284,66 +273,81 @@ static inline void calc_prfcnt_delta(struct kbase_device *kbdev,
  * affect all performance counters which require GPU normalization
  * in every session.
  */
-static void
-kbase_ipa_control_rate_change_notify(struct kbase_clk_rate_listener *listener,
-				     u32 clk_index, u32 clk_rate_hz)
+static void kbase_ipa_control_rate_change_notify(struct kbase_clk_rate_listener *listener,
+						 u32 clk_index, u32 clk_rate_hz)
 {
 	if ((clk_index == KBASE_CLOCK_DOMAIN_TOP) && (clk_rate_hz != 0)) {
-		size_t i;
-		unsigned long flags;
 		struct kbase_ipa_control_listener_data *listener_data =
-			container_of(listener,
-				     struct kbase_ipa_control_listener_data,
-				     listener);
-		struct kbase_device *kbdev = listener_data->kbdev;
-		struct kbase_ipa_control *ipa_ctrl = &kbdev->csf.ipa_control;
+			container_of(listener, struct kbase_ipa_control_listener_data, listener);
 
-		spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
-
-		if (!kbdev->pm.backend.gpu_ready) {
-			dev_vdbg(kbdev->dev,
-				"%s: backup clk rate:%u change while gpu power off", __func__,
-				clk_rate_hz);
-			/* Backup clk rate value and update timer at next power on */
-			spin_lock(&ipa_ctrl->lock);
-			ipa_ctrl->cur_gpu_rate = clk_rate_hz;
-			spin_unlock(&ipa_ctrl->lock);
-			spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
-			return;
-		}
-
-		/* Interrupts are already disabled and interrupt state is also saved */
-		spin_lock(&ipa_ctrl->lock);
-
-		for (i = 0; i < ipa_ctrl->num_active_sessions; i++) {
-			size_t j;
-			struct kbase_ipa_control_session *session = &ipa_ctrl->sessions[i];
-
-			for (j = 0; j < session->num_prfcnts; j++) {
-				struct kbase_ipa_control_prfcnt *prfcnt =
-					&session->prfcnts[j];
-
-				if (prfcnt->gpu_norm)
-					calc_prfcnt_delta(kbdev, prfcnt, true);
-			 }
-		}
-
-		ipa_ctrl->cur_gpu_rate = clk_rate_hz;
-
-		/* Update the timer for automatic sampling if active sessions
-		 * are present. Counters have already been manually sampled.
-		 */
-		if (ipa_ctrl->num_active_sessions > 0) {
-			kbase_reg_write(kbdev, IPA_CONTROL_REG(TIMER),
-					timer_value(ipa_ctrl->cur_gpu_rate));
-		}
-
-		spin_unlock(&ipa_ctrl->lock);
-
-		spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+		/* Save the rate and delegate the job to a work item */
+		atomic_set(&listener_data->rate, clk_rate_hz);
+		queue_work(listener_data->clk_chg_wq, &listener_data->clk_chg_work);
 	}
 }
 
+static void kbase_ipa_ctrl_rate_change_worker(struct work_struct *data)
+{
+	struct kbase_ipa_control_listener_data *listener_data =
+		container_of(data, struct kbase_ipa_control_listener_data, clk_chg_work);
+	struct kbase_device *kbdev = listener_data->kbdev;
+	struct kbase_ipa_control *ipa_ctrl = &kbdev->csf.ipa_control;
+	unsigned long flags;
+	u32 rate;
+	size_t i;
+
+	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
+
+	if (!kbdev->pm.backend.gpu_ready) {
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
+		u32 clk_rate_hz = (u32)atomic_read(&listener_data->rate);
+		dev_dbg(kbdev->dev,
+				"%s: backup clk rate:%u change while gpu power off", __func__,
+				clk_rate_hz);
+
+		/* Backup clk rate value and update timer at next power on */
+		spin_lock(&ipa_ctrl->lock);
+		ipa_ctrl->cur_gpu_rate = clk_rate_hz;
+		spin_unlock(&ipa_ctrl->lock);
+#else
+		dev_err(kbdev->dev, "%s: GPU frequency cannot change while GPU is off", __func__);
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY */
+		spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+		return;
+	}
+
+	spin_lock(&ipa_ctrl->lock);
+	/* Picking up the latest notified rate */
+	rate = (u32)atomic_read(&listener_data->rate);
+
+	for (i = 0; i < KBASE_IPA_CONTROL_MAX_SESSIONS; i++) {
+		struct kbase_ipa_control_session *session = &ipa_ctrl->sessions[i];
+
+		if (session->active) {
+			size_t j;
+
+			for (j = 0; j < session->num_prfcnts; j++) {
+				struct kbase_ipa_control_prfcnt *prfcnt = &session->prfcnts[j];
+
+				if (prfcnt->gpu_norm)
+					calc_prfcnt_delta(kbdev, prfcnt, true);
+			}
+		}
+	}
+
+	ipa_ctrl->cur_gpu_rate = rate;
+	/* Update the timer for automatic sampling if active sessions
+	 * are present. Counters have already been manually sampled.
+	 */
+	if (ipa_ctrl->num_active_sessions > 0)
+		kbase_reg_write32(kbdev, IPA_CONTROL_ENUM(TIMER), timer_value(rate));
+
+	spin_unlock(&ipa_ctrl->lock);
+	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+}
+
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
+		IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
 static
 int kbase_ipa_control_rate_change_notify_ex(struct kbase_device *kbdev,
 					       u32 clk_index, u32 clk_rate_hz)
@@ -352,53 +356,68 @@ int kbase_ipa_control_rate_change_notify_ex(struct kbase_device *kbdev,
 	struct kbase_ipa_control *ipa_ctrl = &kbdev->csf.ipa_control;
 	struct kbase_ipa_control_listener_data *listener_data =
 		ipa_ctrl->rtm_listener_data;
+	unsigned long flags;
 
+	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
 	kbase_ipa_control_rate_change_notify(&listener_data->listener,
 					     clk_index, clk_rate_hz * 1000);
-
+	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
 	return 0;
 }
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY */
 
 void kbase_ipa_control_init(struct kbase_device *kbdev)
 {
 	struct kbase_ipa_control *ipa_ctrl = &kbdev->csf.ipa_control;
 	struct kbase_clk_rate_trace_manager *clk_rtm = &kbdev->pm.clk_rtm;
 	struct kbase_ipa_control_listener_data *listener_data;
-	size_t i, j;
+	size_t i;
+	unsigned long flags;
+	unsigned int curr_top_freq = 0;
 
 	for (i = 0; i < KBASE_IPA_CORE_TYPE_NUM; i++) {
-		for (j = 0; j < KBASE_IPA_CONTROL_NUM_BLOCK_COUNTERS; j++) {
-			ipa_ctrl->blocks[i].select[j].idx = 0;
-			ipa_ctrl->blocks[i].select[j].refcount = 0;
-		}
-		ipa_ctrl->blocks[i].num_available_counters =
-			KBASE_IPA_CONTROL_NUM_BLOCK_COUNTERS;
+		ipa_ctrl->blocks[i].num_available_counters = KBASE_IPA_CONTROL_NUM_BLOCK_COUNTERS;
 	}
+
 	spin_lock_init(&ipa_ctrl->lock);
-	ipa_ctrl->num_active_sessions = 0;
-	for (i = 0; i < KBASE_IPA_CONTROL_MAX_SESSIONS; i++) {
-		ipa_ctrl->sessions[i].active = false;
-	}
 
-	listener_data = kmalloc(sizeof(struct kbase_ipa_control_listener_data),
-				GFP_KERNEL);
+	listener_data = kmalloc(sizeof(struct kbase_ipa_control_listener_data), GFP_KERNEL);
 	if (listener_data) {
-		listener_data->listener.notify =
-			kbase_ipa_control_rate_change_notify;
-		listener_data->kbdev = kbdev;
-		ipa_ctrl->rtm_listener_data = listener_data;
-	}
+		listener_data->clk_chg_wq =
+			alloc_workqueue("ipa_ctrl_wq", WQ_HIGHPRI | WQ_UNBOUND, 1);
+		if (listener_data->clk_chg_wq) {
+			INIT_WORK(&listener_data->clk_chg_work, kbase_ipa_ctrl_rate_change_worker);
+			INIT_LIST_HEAD(&listener_data->listener.node);
+			listener_data->listener.notify = kbase_ipa_control_rate_change_notify;
+			listener_data->kbdev = kbdev;
+			ipa_ctrl->rtm_listener_data = listener_data;
+			/* Initialise to 0, which is out of normal notified rates */
+			atomic_set(&listener_data->rate, 0);
+		} else {
+			dev_warn(kbdev->dev,
+				 "%s: failed to allocate workqueue, clock rate update disabled",
+				 __func__);
+			kfree(listener_data);
+			listener_data = NULL;
+		}
+	} else
+		dev_warn(kbdev->dev,
+			 "%s: failed to allocate memory, IPA control clock rate update disabled",
+			 __func__);
 
-	spin_lock(&clk_rtm->lock);
+	spin_lock_irqsave(&clk_rtm->lock, flags);
 	if (clk_rtm->clks[KBASE_CLOCK_DOMAIN_TOP])
-		ipa_ctrl->cur_gpu_rate =
-			clk_rtm->clks[KBASE_CLOCK_DOMAIN_TOP]->clock_val;
+		ipa_ctrl->cur_gpu_rate = clk_rtm->clks[KBASE_CLOCK_DOMAIN_TOP]->clock_val;
 	if (listener_data)
-		kbase_clk_rate_trace_manager_subscribe_no_lock(
-			clk_rtm, &listener_data->listener);
-	spin_unlock(&clk_rtm->lock);
-
+		kbase_clk_rate_trace_manager_subscribe_no_lock(clk_rtm, &listener_data->listener);
+	spin_unlock_irqrestore(&clk_rtm->lock, flags);
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
+	IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
 	mtk_common_rate_change_notify_fp = kbase_ipa_control_rate_change_notify_ex;
+	curr_top_freq = gpufreq_get_cur_freq(TARGET_GPU);
+	MTKGPUFreq_change_notify(0, curr_top_freq);
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY */
+
 }
 KBASE_EXPORT_TEST_API(kbase_ipa_control_init);
 
@@ -407,18 +426,19 @@ void kbase_ipa_control_term(struct kbase_device *kbdev)
 	unsigned long flags;
 	struct kbase_clk_rate_trace_manager *clk_rtm = &kbdev->pm.clk_rtm;
 	struct kbase_ipa_control *ipa_ctrl = &kbdev->csf.ipa_control;
-	struct kbase_ipa_control_listener_data *listener_data =
-		ipa_ctrl->rtm_listener_data;
+	struct kbase_ipa_control_listener_data *listener_data = ipa_ctrl->rtm_listener_data;
 
 	WARN_ON(ipa_ctrl->num_active_sessions);
 
-	if (listener_data)
+	if (listener_data) {
 		kbase_clk_rate_trace_manager_unsubscribe(clk_rtm, &listener_data->listener);
+		destroy_workqueue(listener_data->clk_chg_wq);
+	}
 	kfree(ipa_ctrl->rtm_listener_data);
 
 	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
-	if (kbdev->pm.backend.gpu_powered)
-		kbase_reg_write(kbdev, IPA_CONTROL_REG(TIMER), 0);
+	if (kbase_io_is_gpu_powered(kbdev))
+		kbase_reg_write32(kbdev, IPA_CONTROL_ENUM(TIMER), 0);
 	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
 }
 KBASE_EXPORT_TEST_API(kbase_ipa_control_term);
@@ -439,8 +459,7 @@ static void session_read_raw_values(struct kbase_device *kbdev,
 
 	for (i = 0; i < session->num_prfcnts; i++) {
 		struct kbase_ipa_control_prfcnt *prfcnt = &session->prfcnts[i];
-		u64 raw_value = read_value_cnt(kbdev, (u8)prfcnt->type,
-					       prfcnt->select_idx);
+		u64 raw_value = read_value_cnt(kbdev, (u8)prfcnt->type, prfcnt->select_idx);
 
 		prfcnt->latest_raw_value = raw_value;
 	}
@@ -465,12 +484,10 @@ static void session_read_raw_values(struct kbase_device *kbdev,
  *
  * Return: 0 on success, or error code on failure.
  */
-static int session_gpu_start(struct kbase_device *kbdev,
-			     struct kbase_ipa_control *ipa_ctrl,
+static int session_gpu_start(struct kbase_device *kbdev, struct kbase_ipa_control *ipa_ctrl,
 			     struct kbase_ipa_control_session *session)
 {
-	bool first_start =
-		(session != NULL) && (ipa_ctrl->num_active_sessions == 0);
+	bool first_start = (session != NULL) && (ipa_ctrl->num_active_sessions == 0);
 	int ret = 0;
 
 	lockdep_assert_held(&kbdev->csf.ipa_control.lock);
@@ -491,14 +508,12 @@ static int session_gpu_start(struct kbase_device *kbdev,
 	 * sampling.
 	 */
 	if (!session || first_start) {
-		kbase_reg_write(kbdev, IPA_CONTROL_REG(COMMAND),
-				COMMAND_SAMPLE);
+		kbase_reg_write32(kbdev, IPA_CONTROL_ENUM(COMMAND), COMMAND_SAMPLE);
 		ret = wait_status(kbdev, STATUS_COMMAND_ACTIVE);
 		if (ret)
-			dev_err(kbdev->dev, "%s: failed to sample new counters",
-				__func__);
-		kbase_reg_write(kbdev, IPA_CONTROL_REG(TIMER),
-				timer_value(ipa_ctrl->cur_gpu_rate));
+			dev_err(kbdev->dev, "%s: failed to sample new counters", __func__);
+		kbase_reg_write32(kbdev, IPA_CONTROL_ENUM(TIMER),
+				  timer_value(ipa_ctrl->cur_gpu_rate));
 	}
 
 	/*
@@ -511,26 +526,36 @@ static int session_gpu_start(struct kbase_device *kbdev,
 	 */
 	if (!ret) {
 		if (session) {
+			/* On starting a session, value read is required for
+			 * IPA power model's calculation initialization.
+			 */
 			session_read_raw_values(kbdev, session);
 		} else {
 			size_t session_idx;
 
-			for (session_idx = 0;
-			     session_idx < ipa_ctrl->num_active_sessions;
-			     session_idx++)
-				session_read_raw_values(
-					kbdev,
-					&ipa_ctrl->sessions[session_idx]);
+			for (session_idx = 0; session_idx < KBASE_IPA_CONTROL_MAX_SESSIONS;
+			     session_idx++) {
+				struct kbase_ipa_control_session *session_to_check =
+					&ipa_ctrl->sessions[session_idx];
+
+				if (session_to_check->active)
+					session_read_raw_values(kbdev, session_to_check);
+			}
 		}
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
+		IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY) && \
+		IS_ENABLED(CONFIG_MALI_MTK_GPU_DVFS_READ_SOC_TIMER)
+		if (!first_start)
+			mtk_common_get_system_timer_and_record(kbdev);
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY && CONFIG_MALI_MTK_GPU_DVFS_READ_SOC_TIMER*/
 	}
 
 	return ret;
 }
 
-int kbase_ipa_control_register(
-	struct kbase_device *kbdev,
-	const struct kbase_ipa_control_perf_counter *perf_counters,
-	size_t num_counters, void **client)
+int kbase_ipa_control_register(struct kbase_device *kbdev,
+			       const struct kbase_ipa_control_perf_counter *perf_counters,
+			       size_t num_counters, void **client)
 {
 	int ret = 0;
 	size_t i, session_idx, req_counters[KBASE_IPA_CORE_TYPE_NUM];
@@ -540,8 +565,10 @@ int kbase_ipa_control_register(
 	struct kbase_ipa_control_session *session = NULL;
 	unsigned long flags;
 
-	if (WARN_ON(kbdev == NULL) || WARN_ON(perf_counters == NULL) ||
-	    WARN_ON(client == NULL) ||
+	if (WARN_ON(unlikely(kbdev == NULL)))
+		return -ENODEV;
+
+	if (WARN_ON(perf_counters == NULL) || WARN_ON(client == NULL) ||
 	    WARN_ON(num_counters > KBASE_IPA_CONTROL_MAX_COUNTERS)) {
 		dev_err(kbdev->dev, "%s: wrong input arguments", __func__);
 		return -EINVAL;
@@ -571,10 +598,8 @@ int kbase_ipa_control_register(
 		enum kbase_ipa_core_type type = perf_counters[i].type;
 		u8 idx = perf_counters[i].idx;
 
-		if ((type >= KBASE_IPA_CORE_TYPE_NUM) ||
-		    (idx >= KBASE_IPA_CONTROL_CNT_MAX_IDX)) {
-			dev_err(kbdev->dev,
-				"%s: invalid requested type %u and/or index %u",
+		if ((type >= KBASE_IPA_CORE_TYPE_NUM) || (idx >= KBASE_IPA_CONTROL_CNT_MAX_IDX)) {
+			dev_err(kbdev->dev, "%s: invalid requested type %u and/or index %u",
 				__func__, type, idx);
 			ret = -EINVAL;
 			goto exit;
@@ -600,8 +625,7 @@ int kbase_ipa_control_register(
 	}
 
 	for (i = 0; i < KBASE_IPA_CORE_TYPE_NUM; i++)
-		if (req_counters[i] >
-		    ipa_ctrl->blocks[i].num_available_counters) {
+		if (req_counters[i] > ipa_ctrl->blocks[i].num_available_counters) {
 			dev_err(kbdev->dev,
 				"%s: more counters (%zu) than available (%zu) have been requested for type %zu",
 				__func__, req_counters[i],
@@ -616,16 +640,15 @@ int kbase_ipa_control_register(
 	 * of the session and update the configuration of performance counters
 	 * in the internal state of kbase_ipa_control.
 	 */
-	for (session_idx = 0; session_idx < KBASE_IPA_CONTROL_MAX_SESSIONS;
-	     session_idx++) {
-		session = &ipa_ctrl->sessions[session_idx];
-		if (!session->active)
+	for (session_idx = 0; session_idx < KBASE_IPA_CONTROL_MAX_SESSIONS; session_idx++) {
+		if (!ipa_ctrl->sessions[session_idx].active) {
+			session = &ipa_ctrl->sessions[session_idx];
 			break;
+		}
 	}
 
 	if (!session) {
-		dev_err(kbdev->dev, "%s: wrong or corrupt session state",
-			__func__);
+		dev_err(kbdev->dev, "%s: wrong or corrupt session state", __func__);
 		ret = -EBUSY;
 		goto exit;
 	}
@@ -640,8 +663,7 @@ int kbase_ipa_control_register(
 			prfcnt_config = &ipa_ctrl->blocks[type].select[j];
 
 			if (already_configured[i]) {
-				if ((prfcnt_config->refcount > 0) &&
-				    (prfcnt_config->idx == idx)) {
+				if ((prfcnt_config->refcount > 0) && (prfcnt_config->idx == idx)) {
 					break;
 				}
 			} else {
@@ -650,8 +672,7 @@ int kbase_ipa_control_register(
 			}
 		}
 
-		if (WARN_ON((prfcnt_config->refcount > 0 &&
-			     prfcnt_config->idx != idx) ||
+		if (WARN_ON((prfcnt_config->refcount > 0 && prfcnt_config->idx != idx) ||
 			    (j == KBASE_IPA_CONTROL_NUM_BLOCK_COUNTERS))) {
 			dev_err(kbdev->dev,
 				"%s: invalid internal state: counter already configured or no counter available to configure",
@@ -668,14 +689,14 @@ int kbase_ipa_control_register(
 		session->prfcnts[i].accumulated_diff = 0;
 		session->prfcnts[i].type = type;
 		session->prfcnts[i].select_idx = j;
-		session->prfcnts[i].scaling_factor =
-			perf_counters[i].scaling_factor;
+		session->prfcnts[i].scaling_factor = perf_counters[i].scaling_factor;
 		session->prfcnts[i].gpu_norm = perf_counters[i].gpu_norm;
+		session->prfcnts[i].gpu_active_cycle_wrap = 0;
 
 		/* Reports to this client for GPU time spent in protected mode
 		 * should begin from the point of registration.
 		 */
-		session->last_query_time = ktime_get_ns();
+		session->last_query_time = ktime_get_raw_ns();
 
 		/* Initially, no time has been spent in protected mode */
 		session->protm_time = 0;
@@ -691,8 +712,7 @@ int kbase_ipa_control_register(
 	if (new_config) {
 		ret = update_select_registers(kbdev);
 		if (ret)
-			dev_err(kbdev->dev,
-				"%s: failed to apply new SELECT configuration",
+			dev_err(kbdev->dev, "%s: failed to apply new SELECT configuration",
 				__func__);
 	}
 
@@ -723,7 +743,10 @@ int kbase_ipa_control_unregister(struct kbase_device *kbdev, const void *client)
 	unsigned long flags;
 	bool new_config = false, valid_session = false;
 
-	if (WARN_ON(kbdev == NULL) || WARN_ON(client == NULL)) {
+	if (WARN_ON(unlikely(kbdev == NULL)))
+		return -ENODEV;
+
+	if (WARN_ON(client == NULL)) {
 		dev_err(kbdev->dev, "%s: wrong input arguments", __func__);
 		return -EINVAL;
 	}
@@ -755,8 +778,7 @@ int kbase_ipa_control_unregister(struct kbase_device *kbdev, const void *client)
 	}
 
 	if (!session->active) {
-		dev_err(kbdev->dev, "%s: session is already inactive",
-			__func__);
+		dev_err(kbdev->dev, "%s: session is already inactive", __func__);
 		ret = -EINVAL;
 		goto exit;
 	}
@@ -780,9 +802,7 @@ int kbase_ipa_control_unregister(struct kbase_device *kbdev, const void *client)
 	if (new_config) {
 		ret = update_select_registers(kbdev);
 		if (ret)
-			dev_err(kbdev->dev,
-				"%s: failed to apply SELECT configuration",
-				__func__);
+			dev_err(kbdev->dev, "%s: failed to apply SELECT configuration", __func__);
 	}
 
 	session->num_prfcnts = 0;
@@ -796,9 +816,8 @@ exit:
 }
 KBASE_EXPORT_TEST_API(kbase_ipa_control_unregister);
 
-int kbase_ipa_control_query(struct kbase_device *kbdev, const void *client,
-			    u64 *values, size_t num_values, u64 *protected_time,
-			    ktime_t *now)
+int kbase_ipa_control_query(struct kbase_device *kbdev, const void *client, u64 *values,
+			    size_t num_values, u64 *protected_time)
 {
 	struct kbase_ipa_control *ipa_ctrl;
 	struct kbase_ipa_control_session *session;
@@ -806,8 +825,10 @@ int kbase_ipa_control_query(struct kbase_device *kbdev, const void *client,
 	unsigned long flags;
 	bool gpu_ready;
 
-	if (WARN_ON(kbdev == NULL) || WARN_ON(client == NULL) ||
-	    WARN_ON(values == NULL)) {
+	if (WARN_ON(unlikely(kbdev == NULL)))
+		return -ENODEV;
+
+	if (WARN_ON(client == NULL) || WARN_ON(values == NULL)) {
 		dev_err(kbdev->dev, "%s: wrong input arguments", __func__);
 		return -EINVAL;
 	}
@@ -815,9 +836,13 @@ int kbase_ipa_control_query(struct kbase_device *kbdev, const void *client,
 	ipa_ctrl = &kbdev->csf.ipa_control;
 	session = (struct kbase_ipa_control_session *)client;
 
+	if (!session->active) {
+		dev_err(kbdev->dev, "%s: attempt to query inactive session", __func__);
+		return -EINVAL;
+	}
+
 	if (WARN_ON(num_values < session->num_prfcnts)) {
-		dev_err(kbdev->dev,
-			"%s: not enough space (%zu) to return all counter values (%zu)",
+		dev_err(kbdev->dev, "%s: not enough space (%zu) to return all counter values (%zu)",
 			__func__, num_values, session->num_prfcnts);
 		return -EINVAL;
 	}
@@ -832,13 +857,20 @@ int kbase_ipa_control_query(struct kbase_device *kbdev, const void *client,
 		/* Return all the accumulated difference */
 		values[i] = prfcnt->accumulated_diff;
 		prfcnt->accumulated_diff = 0;
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
+	IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY)
+		values[i + session->num_prfcnts] = prfcnt->accumulated_raw_diff;
+		prfcnt->accumulated_raw_diff = 0;
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY */
 	}
-
-	if (now)
-		*now = ktime_get();
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
+		IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY) && \
+		IS_ENABLED(CONFIG_MALI_MTK_GPU_DVFS_READ_SOC_TIMER)
+		mtk_common_get_system_timer_and_record(kbdev);
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY && CONFIG_MALI_MTK_GPU_DVFS_READ_SOC_TIMER*/
 
 	if (protected_time) {
-		u64 time_now = now ? ktime_to_ns(*now) : ktime_get_ns();
+		u64 time_now = ktime_get_raw_ns();
 
 		/* This is the amount of protected-mode time spent prior to
 		 * the current protm period.
@@ -847,8 +879,7 @@ int kbase_ipa_control_query(struct kbase_device *kbdev, const void *client,
 
 		if (kbdev->protected_mode) {
 			*protected_time +=
-				time_now - MAX(session->last_query_time,
-					       ipa_ctrl->protm_start);
+				time_now - MAX(session->last_query_time, ipa_ctrl->protm_start);
 		}
 		session->last_query_time = time_now;
 		session->protm_time = 0;
@@ -878,37 +909,32 @@ void kbase_ipa_control_handle_gpu_power_off(struct kbase_device *kbdev)
 	spin_lock(&ipa_ctrl->lock);
 
 	/* First disable the automatic sampling through TIMER  */
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(TIMER), 0);
+	kbase_reg_write32(kbdev, IPA_CONTROL_ENUM(TIMER), 0);
 	ret = wait_status(kbdev, STATUS_TIMER_ENABLED);
 	if (ret) {
-		dev_err(kbdev->dev,
-			"Wait for disabling of IPA control timer failed: %d",
-			ret);
+		dev_err(kbdev->dev, "Wait for disabling of IPA control timer failed: %d", ret);
 	}
 
 	/* Now issue the manual SAMPLE command */
-	kbase_reg_write(kbdev, IPA_CONTROL_REG(COMMAND), COMMAND_SAMPLE);
+	kbase_reg_write32(kbdev, IPA_CONTROL_ENUM(COMMAND), COMMAND_SAMPLE);
 	ret = wait_status(kbdev, STATUS_COMMAND_ACTIVE);
 	if (ret) {
-		dev_err(kbdev->dev,
-			"Wait for the completion of manual sample failed: %d",
-			ret);
+		dev_err(kbdev->dev, "Wait for the completion of manual sample failed: %d", ret);
 	}
 
-	for (session_idx = 0; session_idx < ipa_ctrl->num_active_sessions;
-	     session_idx++) {
-		struct kbase_ipa_control_session *session =
-			&ipa_ctrl->sessions[session_idx];
-		size_t i;
+	for (session_idx = 0; session_idx < KBASE_IPA_CONTROL_MAX_SESSIONS; session_idx++) {
+		struct kbase_ipa_control_session *session = &ipa_ctrl->sessions[session_idx];
 
-		for (i = 0; i < session->num_prfcnts; i++) {
-			struct kbase_ipa_control_prfcnt *prfcnt =
-				&session->prfcnts[i];
+		if (session->active) {
+			size_t i;
 
-			calc_prfcnt_delta(kbdev, prfcnt, true);
+			for (i = 0; i < session->num_prfcnts; i++) {
+				struct kbase_ipa_control_prfcnt *prfcnt = &session->prfcnts[i];
+
+				calc_prfcnt_delta(kbdev, prfcnt, true);
+			}
 		}
 	}
-
 	spin_unlock(&ipa_ctrl->lock);
 }
 
@@ -922,13 +948,19 @@ void kbase_ipa_control_handle_gpu_power_on(struct kbase_device *kbdev)
 	/* GPU should have become ready for use when this function gets called */
 	WARN_ON(!kbdev->pm.backend.gpu_ready);
 
+#if IS_ENABLED(CONFIG_MALI_MIDGARD_DVFS) && \
+	IS_ENABLED(CONFIG_MALI_MTK_DVFS_POLICY) && \
+	IS_ENABLED(CONFIG_MALI_MTK_GPU_DVFS_HINT_26M_LOADING)
+	mtk_dvfs_hint_26m_setting();
+	gpu_power_status = true;
+#endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY && CONFIG_MALI_MTK_GPU_DVFS_HINT_26M_LOADING*/
+
 	/* Interrupts are already disabled and interrupt state is also saved */
 	spin_lock(&ipa_ctrl->lock);
 
 	ret = update_select_registers(kbdev);
 	if (ret) {
-		dev_err(kbdev->dev,
-			"Failed to reconfigure the select registers: %d", ret);
+		dev_err(kbdev->dev, "Failed to reconfigure the select registers: %d", ret);
 	}
 
 	/* Accumulator registers would not contain any sample after GPU power
@@ -961,15 +993,13 @@ void kbase_ipa_control_handle_gpu_reset_post(struct kbase_device *kbdev)
 	spin_lock(&ipa_ctrl->lock);
 
 	/* Check the status reset bit is set before acknowledging it */
-	status = kbase_reg_read(kbdev, IPA_CONTROL_REG(STATUS));
+	status = kbase_reg_read32(kbdev, IPA_CONTROL_ENUM(STATUS));
 	if (status & STATUS_RESET) {
 		/* Acknowledge the reset command */
-		kbase_reg_write(kbdev, IPA_CONTROL_REG(COMMAND), COMMAND_RESET_ACK);
+		kbase_reg_write32(kbdev, IPA_CONTROL_ENUM(COMMAND), COMMAND_RESET_ACK);
 		ret = wait_status(kbdev, STATUS_RESET);
 		if (ret) {
-			dev_err(kbdev->dev,
-				"Wait for the reset ack command failed: %d",
-				ret);
+			dev_err(kbdev->dev, "Wait for the reset ack command failed: %d", ret);
 		}
 	}
 
@@ -979,16 +1009,50 @@ void kbase_ipa_control_handle_gpu_reset_post(struct kbase_device *kbdev)
 }
 KBASE_EXPORT_TEST_API(kbase_ipa_control_handle_gpu_reset_post);
 
+void kbase_ipa_control_handle_gpu_sleep_enter(struct kbase_device *kbdev)
+{
+	lockdep_assert_held(&kbdev->hwaccess_lock);
+
+	if (kbdev->pm.backend.mcu_state == KBASE_MCU_IN_SLEEP) {
+		/* GPU Sleep is treated as a power down */
+		kbase_ipa_control_handle_gpu_power_off(kbdev);
+
+		/* SELECT_CSHW register needs to be cleared to prevent any
+		 * IPA control message to be sent to the top level GPU HWCNT.
+		 */
+		kbase_reg_write64(kbdev, IPA_CONTROL_ENUM(SELECT_CSHW), 0);
+
+		/* No need to issue the APPLY command here */
+	}
+}
+KBASE_EXPORT_TEST_API(kbase_ipa_control_handle_gpu_sleep_enter);
+
+void kbase_ipa_control_handle_gpu_sleep_exit(struct kbase_device *kbdev)
+{
+	lockdep_assert_held(&kbdev->hwaccess_lock);
+
+	if (kbdev->pm.backend.mcu_state == KBASE_MCU_IN_SLEEP) {
+		/* To keep things simple, currently exit from
+		 * GPU Sleep is treated as a power on event where
+		 * all 4 SELECT registers are reconfigured.
+		 * On exit from sleep, reconfiguration is needed
+		 * only for the SELECT_CSHW register.
+		 */
+		kbase_ipa_control_handle_gpu_power_on(kbdev);
+	}
+}
+KBASE_EXPORT_TEST_API(kbase_ipa_control_handle_gpu_sleep_exit);
+
 #if MALI_UNIT_TEST
-void kbase_ipa_control_rate_change_notify_test(struct kbase_device *kbdev,
-					       u32 clk_index, u32 clk_rate_hz)
+void kbase_ipa_control_rate_change_notify_test(struct kbase_device *kbdev, u32 clk_index,
+					       u32 clk_rate_hz)
 {
 	struct kbase_ipa_control *ipa_ctrl = &kbdev->csf.ipa_control;
-	struct kbase_ipa_control_listener_data *listener_data =
-		ipa_ctrl->rtm_listener_data;
+	struct kbase_ipa_control_listener_data *listener_data = ipa_ctrl->rtm_listener_data;
 
-	kbase_ipa_control_rate_change_notify(&listener_data->listener,
-					     clk_index, clk_rate_hz);
+	kbase_ipa_control_rate_change_notify(&listener_data->listener, clk_index, clk_rate_hz);
+	/* Ensure the callback has taken effect before returning back to the test caller */
+	flush_work(&listener_data->clk_chg_work);
 }
 KBASE_EXPORT_TEST_API(kbase_ipa_control_rate_change_notify_test);
 #endif
@@ -998,43 +1062,44 @@ void kbase_ipa_control_protm_entered(struct kbase_device *kbdev)
 	struct kbase_ipa_control *ipa_ctrl = &kbdev->csf.ipa_control;
 
 	lockdep_assert_held(&kbdev->hwaccess_lock);
-	ipa_ctrl->protm_start = ktime_get_ns();
+
+
+	ipa_ctrl->protm_start = ktime_get_raw_ns();
 }
 
 void kbase_ipa_control_protm_exited(struct kbase_device *kbdev)
 {
 	struct kbase_ipa_control *ipa_ctrl = &kbdev->csf.ipa_control;
 	size_t i;
-	u64 time_now = ktime_get_ns();
+	u64 time_now = ktime_get_raw_ns();
 	u32 status;
 
 	lockdep_assert_held(&kbdev->hwaccess_lock);
 
-	for (i = 0; i < ipa_ctrl->num_active_sessions; i++) {
-		struct kbase_ipa_control_session *session =
-			&ipa_ctrl->sessions[i];
-		u64 protm_time = time_now - MAX(session->last_query_time,
-						ipa_ctrl->protm_start);
 
-		session->protm_time += protm_time;
+	for (i = 0; i < KBASE_IPA_CONTROL_MAX_SESSIONS; i++) {
+		struct kbase_ipa_control_session *session = &ipa_ctrl->sessions[i];
+
+		if (session->active) {
+			u64 protm_time =
+				time_now - MAX(session->last_query_time, ipa_ctrl->protm_start);
+
+			session->protm_time += protm_time;
+		}
 	}
 
 	/* Acknowledge the protected_mode bit in the IPA_CONTROL STATUS
 	 * register
 	 */
-	status = kbase_reg_read(kbdev, IPA_CONTROL_REG(STATUS));
+	status = kbase_reg_read32(kbdev, IPA_CONTROL_ENUM(STATUS));
 	if (status & STATUS_PROTECTED_MODE) {
 		int ret;
 
 		/* Acknowledge the protm command */
-		kbase_reg_write(kbdev, IPA_CONTROL_REG(COMMAND),
-				COMMAND_PROTECTED_ACK);
+		kbase_reg_write32(kbdev, IPA_CONTROL_ENUM(COMMAND), COMMAND_PROTECTED_ACK);
 		ret = wait_status(kbdev, STATUS_PROTECTED_MODE);
 		if (ret) {
-			dev_err(kbdev->dev,
-				"Wait for the protm ack command failed: %d",
-				ret);
+			dev_err(kbdev->dev, "Wait for the protm ack command failed: %d", ret);
 		}
 	}
 }
-

@@ -5,6 +5,7 @@ on early-init
     mtk_gpufreq_${ro.board.platform}.ko \
     mtk_gpu_qos.ko \
     ged.ko \
+    mtk_gpu_iommu_${ro.board.platform}.ko \
     mali_prot_alloc_${ro.board.platform}.ko \
     mali_kbase_${ro.board.platform}.ko \
 

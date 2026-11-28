@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
 /*
  *
- * (C) COPYRIGHT 2019-2021 ARM Limited. All rights reserved.
+ * (C) COPYRIGHT 2019-2025 ARM Limited. All rights reserved.
  *
  * This program is free software and is provided to you under the terms of the
  * GNU General Public License version 2 as published by the Free Software
@@ -21,43 +21,49 @@
 
 #include <mali_kbase.h>
 #include <mali_kbase_ctx_sched.h>
-#include <mali_kbase_hwcnt_context.h>
+#include <mali_kbase_io.h>
+#include <hwcnt/mali_kbase_hwcnt_context.h>
 #include <device/mali_kbase_device.h>
 #include <backend/gpu/mali_kbase_irq_internal.h>
 #include <backend/gpu/mali_kbase_pm_internal.h>
-#include <mali_kbase_regs_history_debugfs.h>
-#include <csf/mali_kbase_csf_trace_buffer.h>
 #include <csf/ipa_control/mali_kbase_csf_ipa_control.h>
 #include <mali_kbase_reset_gpu.h>
+#include <csf/mali_kbase_csf_firmware_log.h>
+#include <csf/mali_kbase_csf_scheduler.h>
+#include <csf/mali_kbase_csf_trace_buffer.h>
 
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
-#include <mtk_gpufreq.h>
+#if IS_ENABLED(CONFIG_MALI_MTK_GPUEB_IRQ)
+#include <gpueb_ipi.h>
+#endif /* CONFIG_MALI_MTK_GPUEB_IRQ */
+
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
 #include <platform/mtk_platform_common.h>
-#endif
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
 
-/* Waiting timeout for GPU reset to complete */
-#define GPU_RESET_TIMEOUT_MS (5000) /* 5 seconds */
-#define DUMP_DWORDS_PER_LINE (4)
-/* 16 characters needed for a 8 byte value in hex & 1 character for space */
-#define DUMP_HEX_CHARS_PER_DWORD ((2 * 8) + 1)
-#define DUMP_HEX_CHARS_PER_LINE  \
-	(DUMP_DWORDS_PER_LINE * DUMP_HEX_CHARS_PER_DWORD)
+#if IS_ENABLED(CONFIG_MALI_MTK_MBRAIN_SUPPORT)
+#include <ged_mali_event.h>
+#include <platform/mtk_platform_common/mtk_platform_mali_event.h>
+#endif /* CONFIG_MALI_MTK_MBRAIN_SUPPORT */
 
-static inline bool
-kbase_csf_reset_state_is_silent(enum kbase_csf_reset_gpu_state state)
+enum kbasep_soft_reset_status {
+	RESET_SUCCESS = 0,
+	SOFT_RESET_FAILED,
+	L2_ON_FAILED,
+	MCU_REINIT_FAILED
+};
+
+static inline bool kbase_csf_reset_state_is_silent(enum kbase_csf_reset_gpu_state state)
 {
 	return (state == KBASE_CSF_RESET_GPU_COMMITTED_SILENT);
 }
 
-static inline bool
-kbase_csf_reset_state_is_committed(enum kbase_csf_reset_gpu_state state)
+static inline bool kbase_csf_reset_state_is_committed(enum kbase_csf_reset_gpu_state state)
 {
 	return (state == KBASE_CSF_RESET_GPU_COMMITTED ||
 		state == KBASE_CSF_RESET_GPU_COMMITTED_SILENT);
 }
 
-static inline bool
-kbase_csf_reset_state_is_active(enum kbase_csf_reset_gpu_state state)
+static inline bool kbase_csf_reset_state_is_active(enum kbase_csf_reset_gpu_state state)
 {
 	return (state == KBASE_CSF_RESET_GPU_HAPPENING);
 }
@@ -105,8 +111,7 @@ int kbase_reset_gpu_prevent_and_wait(struct kbase_device *kbdev)
 {
 	down_read(&kbdev->csf.reset.sem);
 
-	if (atomic_read(&kbdev->csf.reset.state) ==
-	    KBASE_CSF_RESET_GPU_FAILED) {
+	if (atomic_read(&kbdev->csf.reset.state) == KBASE_CSF_RESET_GPU_FAILED) {
 		up_read(&kbdev->csf.reset.sem);
 		return -ENOMEM;
 	}
@@ -125,8 +130,7 @@ int kbase_reset_gpu_try_prevent(struct kbase_device *kbdev)
 	if (!down_read_trylock(&kbdev->csf.reset.sem))
 		return -EAGAIN;
 
-	if (atomic_read(&kbdev->csf.reset.state) ==
-	    KBASE_CSF_RESET_GPU_FAILED) {
+	if (atomic_read(&kbdev->csf.reset.state) == KBASE_CSF_RESET_GPU_FAILED) {
 		up_read(&kbdev->csf.reset.sem);
 		return -ENOMEM;
 	}
@@ -171,9 +175,8 @@ void kbase_reset_gpu_assert_failed_or_prevented(struct kbase_device *kbdev)
 /* Mark the reset as now happening, and synchronize with other threads that
  * might be trying to access the GPU
  */
-static void kbase_csf_reset_begin_hw_access_sync(
-	struct kbase_device *kbdev,
-	enum kbase_csf_reset_gpu_state initial_reset_state)
+static void kbase_csf_reset_begin_hw_access_sync(struct kbase_device *kbdev,
+						 enum kbase_csf_reset_gpu_state initial_reset_state)
 {
 	unsigned long hwaccess_lock_flags;
 	unsigned long scheduler_spin_lock_flags;
@@ -190,7 +193,7 @@ static void kbase_csf_reset_begin_hw_access_sync(
 	 */
 	spin_lock_irqsave(&kbdev->hwaccess_lock, hwaccess_lock_flags);
 	kbase_csf_scheduler_spin_lock(kbdev, &scheduler_spin_lock_flags);
-	atomic_set(&kbdev->csf.reset.state, KBASE_RESET_GPU_HAPPENING);
+	atomic_set(&kbdev->csf.reset.state, KBASE_CSF_RESET_GPU_HAPPENING);
 	kbase_csf_scheduler_spin_unlock(kbdev, scheduler_spin_lock_flags);
 	spin_unlock_irqrestore(&kbdev->hwaccess_lock, hwaccess_lock_flags);
 }
@@ -198,15 +201,13 @@ static void kbase_csf_reset_begin_hw_access_sync(
 /* Mark the reset as finished and allow others threads to once more access the
  * GPU
  */
-static void kbase_csf_reset_end_hw_access(struct kbase_device *kbdev,
-					  int err_during_reset,
+static void kbase_csf_reset_end_hw_access(struct kbase_device *kbdev, int err_during_reset,
 					  bool firmware_inited)
 {
 	unsigned long hwaccess_lock_flags;
 	unsigned long scheduler_spin_lock_flags;
 
-	WARN_ON(!kbase_csf_reset_state_is_active(
-		atomic_read(&kbdev->csf.reset.state)));
+	WARN_ON(!kbase_csf_reset_state_is_active(atomic_read(&kbdev->csf.reset.state)));
 
 	/* Once again, we synchronize with atomic context threads accessing the
 	 * HW, as otherwise any actions they defer could get lost
@@ -215,17 +216,14 @@ static void kbase_csf_reset_end_hw_access(struct kbase_device *kbdev,
 	kbase_csf_scheduler_spin_lock(kbdev, &scheduler_spin_lock_flags);
 
 	if (!err_during_reset) {
-		atomic_set(&kbdev->csf.reset.state,
-			   KBASE_CSF_RESET_GPU_NOT_PENDING);
+		atomic_set(&kbdev->csf.reset.state, KBASE_CSF_RESET_GPU_NOT_PENDING);
 	} else {
 		dev_err(kbdev->dev, "Reset failed to complete");
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
-		ged_log_buf_print2(
-			kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
-			"Reset failed to complete\n",
-			RESET_TIMEOUT);
-#endif
 		atomic_set(&kbdev->csf.reset.state, KBASE_CSF_RESET_GPU_FAILED);
+#if IS_ENABLED(CONFIG_MALI_MTK_TRIGGER_KE)
+		if (kbdev->exception_mask & (1u << EXCEPTION_RESET_FAILED))
+			BUG_ON(1);
+#endif /* CONFIG_MALI_MTK_TRIGGER_KE */
 	}
 
 	kbase_csf_scheduler_spin_unlock(kbdev, scheduler_spin_lock_flags);
@@ -242,116 +240,222 @@ static void kbase_csf_reset_end_hw_access(struct kbase_device *kbdev,
 		kbase_csf_scheduler_enable_tick_timer(kbdev);
 }
 
-static void kbase_csf_debug_dump_registers(struct kbase_device *kbdev)
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+static u32 kbase_reg_read_directly(struct kbase_device *kbdev, u32 offset)
 {
-#if defined(CONFIG_MALI_MTK_DEBUG)
-	kbase_io_history_dump(kbdev);
-#endif
+	u32 val;
 
-	dev_err(kbdev->dev, "Register state:");
-	dev_err(kbdev->dev, "  GPU_IRQ_RAWSTAT=0x%08x   GPU_STATUS=0x%08x  MCU_STATUS=0x%08x",
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(GPU_IRQ_RAWSTAT)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(GPU_STATUS)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(MCU_STATUS)));
-	dev_err(kbdev->dev, "  JOB_IRQ_RAWSTAT=0x%08x   MMU_IRQ_RAWSTAT=0x%08x   GPU_FAULTSTATUS=0x%08x",
-		kbase_reg_read(kbdev, JOB_CONTROL_REG(JOB_IRQ_RAWSTAT)),
-		kbase_reg_read(kbdev, MMU_REG(MMU_IRQ_RAWSTAT)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(GPU_FAULTSTATUS)));
-	dev_err(kbdev->dev, "  GPU_IRQ_MASK=0x%08x   JOB_IRQ_MASK=0x%08x   MMU_IRQ_MASK=0x%08x",
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(GPU_IRQ_MASK)),
-		kbase_reg_read(kbdev, JOB_CONTROL_REG(JOB_IRQ_MASK)),
-		kbase_reg_read(kbdev, MMU_REG(MMU_IRQ_MASK)));
-	dev_err(kbdev->dev, "  PWR_OVERRIDE0=0x%08x   PWR_OVERRIDE1=0x%08x",
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(PWR_OVERRIDE0)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(PWR_OVERRIDE1)));
-	dev_err(kbdev->dev, "  SHADER_CONFIG=0x%08x   L2_MMU_CONFIG=0x%08x   TILER_CONFIG=0x%08x",
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(SHADER_CONFIG)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(L2_MMU_CONFIG)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(TILER_CONFIG)));
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
-	ged_log_buf_print2(
-		kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
-		"Register state:\n");
-	ged_log_buf_print2(
-		kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
-		"  GPU_IRQ_RAWSTAT=0x%08x   GPU_STATUS=0x%08x  MCU_STATUS=0x%08x\n",
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(GPU_IRQ_RAWSTAT)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(GPU_STATUS)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(MCU_STATUS)));
-	ged_log_buf_print2(
-		kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
-		"  JOB_IRQ_RAWSTAT=0x%08x   MMU_IRQ_RAWSTAT=0x%08x   GPU_FAULTSTATUS=0x%08x\n",
-		kbase_reg_read(kbdev, JOB_CONTROL_REG(JOB_IRQ_RAWSTAT)),
-		kbase_reg_read(kbdev, MMU_REG(MMU_IRQ_RAWSTAT)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(GPU_FAULTSTATUS)));
-	ged_log_buf_print2(
-		kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
-		"  GPU_IRQ_MASK=0x%08x   JOB_IRQ_MASK=0x%08x   MMU_IRQ_MASK=0x%08x\n",
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(GPU_IRQ_MASK)),
-		kbase_reg_read(kbdev, JOB_CONTROL_REG(JOB_IRQ_MASK)),
-		kbase_reg_read(kbdev, MMU_REG(MMU_IRQ_MASK)));
-	ged_log_buf_print2(
-		kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
-		"  PWR_OVERRIDE0=0x%08x   PWR_OVERRIDE1=0x%08x\n",
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(PWR_OVERRIDE0)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(PWR_OVERRIDE1)));
-	ged_log_buf_print2(
-		kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
-		"  SHADER_CONFIG=0x%08x   L2_MMU_CONFIG=0x%08x   TILER_CONFIG=0x%08x\n",
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(SHADER_CONFIG)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(L2_MMU_CONFIG)),
-		kbase_reg_read(kbdev, GPU_CONTROL_REG(TILER_CONFIG)));
-#endif
+	if (WARN_ON(!kbase_io_is_gpu_powered(kbdev)))
+		return 0;
+
+	if (WARN_ON(kbdev->dev == NULL))
+		return 0;
+
+	val = readl(kbdev->reg + offset);
+
+#if IS_ENABLED(CONFIG_DEBUG_FS)
+	if (unlikely(kbdev->io_history.enabled))
+		kbase_io_history_add(&kbdev->io_history, kbdev->reg + offset,
+				     val, 0);
+#endif /* CONFIG_DEBUG_FS */
+	dev_dbg(kbdev->dev, "r: reg %08x val %08x", offset, val);
+
+	return val;
 }
 
-static void kbase_csf_dump_firmware_trace_buffer(struct kbase_device *kbdev)
+#define DOORBELL_CFG_BASE 0x20000
+#define MCUC_DB_VALUE_0 0x80
+
+const char *kbase_mcu_state_to_string(enum kbase_mcu_state state);
+const char *kbase_l2_core_state_to_string(enum kbase_l2_core_state state);
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+void kbase_csf_debug_dump_registers(struct kbase_device *kbdev, bool firmware_inited)
+#else
+static void kbase_csf_debug_dump_registers(struct kbase_device *kbdev)
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
 {
-	u8 *buf, *line_str;
-	unsigned int read_size;
-	struct firmware_trace_buffer *tb =
-		kbase_csf_firmware_get_trace_buffer(kbdev, FW_TRACE_BUF_NAME);
+	unsigned long flags;
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+	struct kbase_csf_fw_io *fw_io = &kbdev->csf.fw_io;
+	u32 glb_req, glb_ack, glb_db_req, glb_db_ack;
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
 
-	if (tb == NULL) {
-		dev_vdbg(kbdev->dev, "Can't get the trace buffer, firmware trace dump skipped");
-		return;
+	kbase_io_history_dump(kbdev);
+
+	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
+
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"\tMCU desired = %d\n",
+		kbase_pm_is_mcu_desired(kbdev));
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"\tMCU sw state = %d(%s)\n",
+		kbdev->pm.backend.mcu_state,
+		kbase_mcu_state_to_string(kbdev->pm.backend.mcu_state));
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"\tL2 sw state = %d(%s)\n",
+		kbdev->pm.backend.l2_state,
+		kbase_l2_core_state_to_string(kbdev->pm.backend.l2_state));
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"Register state:\n");
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"  GPU_IRQ_RAWSTAT=0x%08x  GPU_STATUS=0x%08x MCU_STATUS=0x%08x\n",
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_IRQ_RAWSTAT)),
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_STATUS)),
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(MCU_STATUS)));
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"\tMCU control = %d\n",
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(MCU_CONTROL)));
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"\tMCUC_DB_VALUE_0 = %d\n",
+		kbase_reg_read_directly(kbdev, DOORBELL_CFG_BASE + MCUC_DB_VALUE_0));
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"\tGPU_IRQ_MASK = %x\n",
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_IRQ_MASK)));
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"\tGPU_IRQ_RAWSTAT = %x\n",
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_IRQ_RAWSTAT)));
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"  JOB_IRQ_RAWSTAT=0x%08x  MMU_IRQ_RAWSTAT=0x%08x  GPU_FAULTSTATUS=0x%08x\n",
+		kbase_reg_read32(kbdev, JOB_CONTROL_ENUM(JOB_IRQ_RAWSTAT)),
+		kbase_reg_read32(kbdev, MMU_CONTROL_ENUM(IRQ_RAWSTAT)),
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_FAULTSTATUS)));
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"  GPU_IRQ_MASK=0x%08x  JOB_IRQ_MASK=0x%08x  MMU_IRQ_MASK=0x%08x\n",
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_IRQ_MASK)),
+		kbase_reg_read32(kbdev, JOB_CONTROL_ENUM(JOB_IRQ_MASK)),
+		kbase_reg_read32(kbdev, MMU_CONTROL_ENUM(IRQ_MASK)));
+
+	if (kbdev->pm.backend.has_host_pwr_iface) {
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"  PWR_IRQ_RAWSTAT=0x%08x\n",
+			kbase_reg_read32(kbdev, HOST_POWER_ENUM(PWR_IRQ_RAWSTAT)));
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"  PWR_IRQ_MASK=0x%08x\n",
+			kbase_reg_read32(kbdev, HOST_POWER_ENUM(PWR_IRQ_MASK)));
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"  PWR_STATUS=0x%016llx\n",
+			kbase_reg_read64(kbdev, HOST_POWER_ENUM(PWR_STATUS)));
 	}
 
-	buf = kmalloc(PAGE_SIZE + DUMP_HEX_CHARS_PER_LINE + 1, GFP_KERNEL);
-	if (buf == NULL) {
-		dev_err(kbdev->dev, "Short of memory, firmware trace dump skipped");
-		return;
+	if (kbdev->gpu_props.gpu_id.arch_id < GPU_ID_ARCH_MAKE(14, 10, 0)) {
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"  PWR_OVERRIDE0=0x%08x  PWR_OVERRIDE1=0x%08x\n",
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(PWR_OVERRIDE0)),
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(PWR_OVERRIDE1)));
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"  SHADER_CONFIG=0x%08x  L2_MMU_CONFIG=0x%08x  TILER_CONFIG=0x%08x\n",
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(SHADER_CONFIG)),
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(L2_MMU_CONFIG)),
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(TILER_CONFIG)));
 	}
-	line_str = &buf[PAGE_SIZE];
-
-	dev_err(kbdev->dev, "Firmware trace buffer dump:");
-	while ((read_size = kbase_csf_firmware_trace_buffer_read_data(tb, buf,
-								PAGE_SIZE))) {
-		u64 *ptr = (u64 *)buf;
-		u32 num_dwords;
-
-		for (num_dwords = read_size / sizeof(u64);
-		     num_dwords >= DUMP_DWORDS_PER_LINE;
-		     num_dwords -= DUMP_DWORDS_PER_LINE) {
-			dev_err(kbdev->dev, "%016llx %016llx %016llx %016llx",
-				ptr[0], ptr[1], ptr[2], ptr[3]);
-			ptr += DUMP_DWORDS_PER_LINE;
-		}
-
-		if (num_dwords) {
-			int pos = 0;
-
-			while (num_dwords--) {
-				pos += snprintf(line_str + pos,
-						DUMP_HEX_CHARS_PER_DWORD + 1,
-						"%016llx ", ptr[0]);
-				ptr++;
-			}
-
-			dev_err(kbdev->dev, "%s", line_str);
-		}
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+	if (likely(firmware_inited)) {
+		glb_db_ack = kbase_csf_fw_io_global_read(fw_io, GLB_DB_ACK);
+		glb_db_req = kbase_csf_fw_io_global_input_read(fw_io, GLB_DB_REQ);
+		glb_ack = kbase_csf_fw_io_global_read(fw_io, GLB_ACK);
+		glb_req = kbase_csf_fw_io_global_input_read(fw_io, GLB_REQ);
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"\tglb_req %x glb_ack %x glb_db_req %x glb_db_ack %x\n",
+			glb_req, glb_ack, glb_db_req, glb_db_ack);
 	}
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
 
-	kfree(buf);
+	if (kbdev->pm.backend.has_host_pwr_iface) {
+		u32 domain_status;
+		if (kbdev->gpu_props.gpu_id.arch_id < GPU_ID_ARCH_MAKE(14, 10, 0))
+			mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+				"  NEURAL_CONFIG=0x%08x\n",
+				kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(NEURAL_CONFIG)));
+		if (!kbase_pm_get_domain_status(kbdev, PWR_COMMAND_DOMAIN_L2, 0, &domain_status) &&
+		    domain_status)
+			mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+				"  L2_PWR_STATUS=0x%05llx\n",
+				kbase_reg_read64(kbdev, HOST_POWER_ENUM(PWR_CMDARG)));
+	}
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+	dev_err(kbdev->dev, "\tMCU desired = %d\n",
+			kbase_pm_is_mcu_desired(kbdev));
+	dev_err(kbdev->dev, "\tMCU sw state = %d(%s)\n",
+			kbdev->pm.backend.mcu_state,
+			kbase_mcu_state_to_string(kbdev->pm.backend.mcu_state));
+	dev_err(kbdev->dev, "\tL2 sw state = %d(%s)\n",
+			kbdev->pm.backend.l2_state,
+			kbase_l2_core_state_to_string(kbdev->pm.backend.l2_state));
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+	dev_err(kbdev->dev, "Register state:");
+	dev_err(kbdev->dev, "  GPU_IRQ_RAWSTAT=0x%08x  GPU_STATUS=0x%08x MCU_STATUS=0x%08x",
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_IRQ_RAWSTAT)),
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_STATUS)),
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(MCU_STATUS)));
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+	dev_err(kbdev->dev, "\tMCU control = %d\n",
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(MCU_CONTROL)));
+	dev_err(kbdev->dev, "\tMCUC_DB_VALUE_0 = %d\n",
+			kbase_reg_read_directly(kbdev, DOORBELL_CFG_BASE + MCUC_DB_VALUE_0));
+	dev_err(kbdev->dev, "\tGPU_IRQ_MASK = %x\n",
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_IRQ_MASK)));
+	dev_err(kbdev->dev, "\tGPU_IRQ_RAWSTAT = %x\n",
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_IRQ_RAWSTAT)));
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+	dev_err(kbdev->dev,
+		"  JOB_IRQ_RAWSTAT=0x%08x  MMU_IRQ_RAWSTAT=0x%08x  GPU_FAULTSTATUS=0x%08x",
+		kbase_reg_read32(kbdev, JOB_CONTROL_ENUM(JOB_IRQ_RAWSTAT)),
+		kbase_reg_read32(kbdev, MMU_CONTROL_ENUM(IRQ_RAWSTAT)),
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_FAULTSTATUS)));
+	dev_err(kbdev->dev, "  GPU_IRQ_MASK=0x%08x  JOB_IRQ_MASK=0x%08x  MMU_IRQ_MASK=0x%08x",
+		kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(GPU_IRQ_MASK)),
+		kbase_reg_read32(kbdev, JOB_CONTROL_ENUM(JOB_IRQ_MASK)),
+		kbase_reg_read32(kbdev, MMU_CONTROL_ENUM(IRQ_MASK)));
+	if (kbdev->pm.backend.has_host_pwr_iface) {
+		dev_err(kbdev->dev, "  PWR_IRQ_RAWSTAT=0x%08x",
+			kbase_reg_read32(kbdev, HOST_POWER_ENUM(PWR_IRQ_RAWSTAT)));
+		dev_err(kbdev->dev, "  PWR_IRQ_MASK=0x%08x",
+			kbase_reg_read32(kbdev, HOST_POWER_ENUM(PWR_IRQ_MASK)));
+		dev_err(kbdev->dev, "  PWR_STATUS=0x%016llx",
+			kbase_reg_read64(kbdev, HOST_POWER_ENUM(PWR_STATUS)));
+	}
+	if (kbdev->gpu_props.gpu_id.arch_id < GPU_ID_ARCH_MAKE(14, 10, 0)) {
+		dev_err(kbdev->dev, "  PWR_OVERRIDE0=0x%08x  PWR_OVERRIDE1=0x%08x",
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(PWR_OVERRIDE0)),
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(PWR_OVERRIDE1)));
+		dev_err(kbdev->dev,
+			"  SHADER_CONFIG=0x%08x  L2_MMU_CONFIG=0x%08x  TILER_CONFIG=0x%08x",
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(SHADER_CONFIG)),
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(L2_MMU_CONFIG)),
+			kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(TILER_CONFIG)));
+	}
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+	if (likely(firmware_inited)) {
+		glb_db_ack = kbase_csf_fw_io_global_read(fw_io, GLB_DB_ACK);
+		glb_db_req = kbase_csf_fw_io_global_input_read(fw_io, GLB_DB_REQ);
+		glb_ack = kbase_csf_fw_io_global_read(fw_io, GLB_ACK);
+		glb_req = kbase_csf_fw_io_global_input_read(fw_io, GLB_REQ);
+		dev_err(kbdev->dev, "\tglb_req %x glb_ack %x glb_db_req %x glb_db_ack %x\n",
+			glb_req, glb_ack, glb_db_req, glb_db_ack);
+	}
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+
+	if (kbdev->pm.backend.has_host_pwr_iface) {
+		u32 domain_status;
+
+		if (kbdev->gpu_props.gpu_id.arch_id < GPU_ID_ARCH_MAKE(14, 10, 0))
+			dev_err(kbdev->dev, "  NEURAL_CONFIG=0x%08x",
+				kbase_reg_read32(kbdev, GPU_CONTROL_ENUM(NEURAL_CONFIG)));
+		if (!kbase_pm_get_domain_status(kbdev, PWR_COMMAND_DOMAIN_L2, 0, &domain_status) &&
+		    domain_status)
+			dev_err(kbdev->dev, "  L2_PWR_STATUS=0x%05llx",
+				kbase_reg_read64(kbdev, HOST_POWER_ENUM(PWR_CMDARG)));
+	}
+	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
 }
 
 /**
@@ -379,12 +483,156 @@ static void kbase_csf_hwcnt_on_reset_error(struct kbase_device *kbdev)
 	kbase_csf_scheduler_spin_unlock(kbdev, flags);
 }
 
-static int kbase_csf_reset_gpu_now(struct kbase_device *kbdev,
-				   bool firmware_inited, bool silent)
+static noinline enum kbasep_soft_reset_status
+kbase_csf_reset_gpu_once(struct kbase_device *kbdev, bool firmware_inited, bool silent)
 {
 	unsigned long flags;
 	int err;
+	enum kbasep_soft_reset_status ret = RESET_SUCCESS;
+	atomic_t *const ptr_event_id = &kbdev->csf.scheduler.pages_defer_ctrl.protm_event_id;
 
+	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
+	spin_lock(&kbdev->mmu_mask_change);
+	kbase_pm_reset_start_locked(kbdev);
+
+	dev_dbg(kbdev->dev, "We're about to flush out the IRQs and their bottom halves\n");
+	kbdev->irq_reset_flush = true;
+
+	/* Disable IRQ to avoid IRQ handlers to kick in after releasing the
+	 * spinlock; this also clears any outstanding interrupts
+	 */
+	kbase_pm_disable_interrupts_nolock(kbdev);
+
+	spin_unlock(&kbdev->mmu_mask_change);
+	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+
+	dev_dbg(kbdev->dev, "Ensure that any IRQ handlers have finished\n");
+	/* Must be done without any locks IRQ handlers will take. */
+	kbase_synchronize_irqs(kbdev);
+
+	dev_dbg(kbdev->dev, "Flush out any in-flight work items\n");
+	kbase_flush_mmu_wqs(kbdev);
+
+	dev_dbg(kbdev->dev, "The flush has completed so reset the active indicator\n");
+	kbdev->irq_reset_flush = false;
+
+	if (!silent) {
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION | MTK_LOGBUFFER_TYPE_DEFERRED_WHEN_RESET,
+			"Resetting GPU (allowing up to %d ms)\n", RESET_TIMEOUT);
+#else /* CONFIG_MALI_MTK_LOG_BUFFER */
+		dev_err(kbdev->dev, "Resetting GPU (allowing up to %d ms)", RESET_TIMEOUT);
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
+	}
+
+	/* Output the state of some interesting registers to help in the
+	 * debugging of GPU resets, and dump the firmware trace buffer
+	 */
+	if (!silent) {
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+		kbase_csf_debug_dump_registers(kbdev, firmware_inited);
+#else
+		kbase_csf_debug_dump_registers(kbdev);
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+		if (likely(firmware_inited))
+			kbase_csf_firmware_log_dump_buffer(kbdev);
+	}
+
+	{
+		spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
+		kbase_ipa_control_handle_gpu_reset_pre(kbdev);
+		spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+	}
+
+	/* Tell hardware counters a reset is about to occur.
+	 * If the backend is in an unrecoverable error state (e.g. due to
+	 * firmware being unresponsive) this will transition the backend out of
+	 * it, on the assumption a reset will fix whatever problem there was.
+	 */
+	kbase_hwcnt_backend_csf_on_before_reset(&kbdev->hwcnt_gpu_iface);
+
+	mutex_lock(&kbdev->pm.lock);
+	/* Reset the GPU */
+	err = kbase_pm_init_hw(kbdev, 0);
+
+	mutex_unlock(&kbdev->pm.lock);
+
+	kbdev->csf.firmware_unrecoverable = false;
+
+#if IS_ENABLED(CONFIG_MALI_MTK_RESET_RELOAD_ON_FW)
+	if (kbdev->pm.backend.fw_reload_on_reset_worker == true)
+	{
+		kbdev->csf.firmware_reload_needed = false;
+		kbase_csf_firmware_reload(kbdev);
+		dev_info(kbdev->dev, "Reload fw on reset worker.");
+	}
+#endif /* CONFIG_MALI_MTK_RESET_RELOAD_ON_FW */
+	if (WARN_ON(err)) {
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"kbase_pm_init_hw failed err=%d\n", err);
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
+		mtk_common_debug(MTK_COMMON_DBG_DUMP_PM_STATUS, NULL, MTK_DBG_HOOK_RESET_FAIL);
+		mtk_common_debug(MTK_COMMON_DBG_DUMP_INFRA_STATUS, NULL, MTK_DBG_HOOK_RESET_FAIL);
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+		return SOFT_RESET_FAILED;
+	}
+
+	mutex_lock(&kbdev->mmu_hw_mutex);
+	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
+	kbase_ctx_sched_restore_all_as(kbdev);
+	{
+		kbase_ipa_control_handle_gpu_reset_post(kbdev);
+	}
+	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+	mutex_unlock(&kbdev->mmu_hw_mutex);
+
+	kbase_pm_enable_interrupts(kbdev);
+
+	if (atomic_read(ptr_event_id) & CSF_SCHED_PROTM_EVENT_FLAGS_MASK) {
+		kbase_csf_scheduler_spin_lock(kbdev, &flags);
+		kbase_csf_scheduler_complete_protm_event(kbdev);
+		kbase_csf_scheduler_spin_unlock(kbdev, flags);
+		dev_dbg(kbdev->dev, "GPU reset lead to protected mode new event_seq: %d",
+			GET_PROTM_EVENT_ID_SEQ(atomic_read(ptr_event_id)));
+	}
+
+	mutex_lock(&kbdev->pm.lock);
+	kbase_pm_reset_complete(kbdev);
+	/* Synchronously wait for the reload of firmware to complete */
+	err = kbase_pm_wait_for_desired_state(kbdev);
+
+	if (err) {
+		spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
+		if (!kbase_pm_l2_is_in_desired_state_locked(kbdev))
+			ret = L2_ON_FAILED;
+		else if (!kbase_pm_mcu_is_in_desired_state_locked(kbdev))
+			ret = MCU_REINIT_FAILED;
+		spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"kbase_pm_wait_for_desired_state failed err=%d\n", err);
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
+		mtk_common_debug(MTK_COMMON_DBG_DUMP_PM_STATUS, NULL, MTK_DBG_HOOK_FWRELOAD_FAIL);
+		mtk_common_debug(MTK_COMMON_DBG_DUMP_INFRA_STATUS, NULL, MTK_DBG_HOOK_FWRELOAD_FAIL);
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+	}
+
+	mutex_unlock(&kbdev->pm.lock);
+
+	return ret;
+}
+
+static int kbase_csf_reset_gpu_now(struct kbase_device *kbdev, bool firmware_inited, bool silent)
+{
+	unsigned long flags;
+	enum kbasep_soft_reset_status ret;
+
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+	mtk_common_debug(MTK_COMMON_DBG_DUMP_DB_BY_SETTING, NULL, MTK_DBG_HOOK_RESET);
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
 	WARN_ON(kbdev->irq_reset_flush);
 	/* The reset must now be happening otherwise other threads will not
 	 * have been synchronized with to stop their access to the HW
@@ -402,157 +650,150 @@ static int kbase_csf_reset_gpu_now(struct kbase_device *kbdev,
 	 * of active CSG slots would also be done as a part of reset.
 	 */
 	if (likely(firmware_inited))
-		kbase_csf_scheduler_reset(kbdev);
+		kbase_csf_scheduler_reset(kbdev, false);
+
+	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
+	kbdev->csf.firmware_reload_needed = false;
+	/* Prevent MCU enable before FW data is reloaded */
+	kbdev->pm.backend.in_reset = true;
+	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+
 	cancel_work_sync(&kbdev->csf.firmware_reload_work);
 
-	dev_vdbg(kbdev->dev, "Disable GPU hardware counters.\n");
-	/* This call will block until counters are disabled.
-	 */
-	kbase_hwcnt_context_disable(kbdev->hwcnt_gpu_ctx);
-
-	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
-	spin_lock(&kbdev->mmu_mask_change);
-	kbase_pm_reset_start_locked(kbdev);
-
-	dev_vdbg(kbdev->dev,
-		"We're about to flush out the IRQs and their bottom halves\n");
-	kbdev->irq_reset_flush = true;
-
-	/* Disable IRQ to avoid IRQ handlers to kick in after releasing the
-	 * spinlock; this also clears any outstanding interrupts
-	 */
-	kbase_pm_disable_interrupts_nolock(kbdev);
-
-	spin_unlock(&kbdev->mmu_mask_change);
-	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
-
-	dev_vdbg(kbdev->dev, "Ensure that any IRQ handlers have finished\n");
-	/* Must be done without any locks IRQ handlers will take.
-	 */
-	kbase_synchronize_irqs(kbdev);
-
-	dev_vdbg(kbdev->dev, "Flush out any in-flight work items\n");
-	kbase_flush_mmu_wqs(kbdev);
-
-	dev_vdbg(kbdev->dev,
-		"The flush has completed so reset the active indicator\n");
-	kbdev->irq_reset_flush = false;
-
-	mutex_lock(&kbdev->pm.lock);
-	if (!silent) {
-		dev_err(kbdev->dev, "Resetting GPU (allowing up to %d ms)",
-								RESET_TIMEOUT);
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
-		ged_log_buf_print2(
-			kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
-			"Resetting GPU (allowing up to %d ms)\n",
-			RESET_TIMEOUT);
-#endif
+	{
+		dev_dbg(kbdev->dev, "Disable GPU hardware counters.\n");
+		/* This call will block until counters are disabled. */
+		kbase_hwcnt_context_disable(kbdev->hwcnt_gpu_ctx);
 	}
 
-	/* Output the state of some interesting registers to help in the
-	 * debugging of GPU resets, and dump the firmware trace buffer
-	 */
-	if (!silent) {
-		kbase_csf_debug_dump_registers(kbdev);
-		if (likely(firmware_inited))
-			kbase_csf_dump_firmware_trace_buffer(kbdev);
-	}
+#if IS_ENABLED(CONFIG_MALI_MTK_RESET_RELOAD_ON_FW)
+	kbdev->pm.backend.fw_reload_on_reset_worker = false;
+#endif /* IS_ENABLED(CONFIG_MALI_MTK_RESET_RELOAD_ON_FW) */
+	ret = kbase_csf_reset_gpu_once(kbdev, firmware_inited, silent);
 
-	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
-	kbase_ipa_control_handle_gpu_reset_pre(kbdev);
-	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
-
-	/* Tell hardware counters a reset is about to occur.
-	 * If the backend is in an unrecoverable error state (e.g. due to
-	 * firmware being unresponsive) this will transition the backend out of
-	 * it, on the assumption a reset will fix whatever problem there was.
-	 */
-	kbase_hwcnt_backend_csf_on_before_reset(&kbdev->hwcnt_gpu_iface);
-
-	/* Reset the GPU */
-	err = kbase_pm_init_hw(kbdev, 0);
-
-	mutex_unlock(&kbdev->pm.lock);
-
-	if (WARN_ON(err)) {
-		kbase_csf_hwcnt_on_reset_error(kbdev);
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
-		if (!mtk_common_gpufreq_bringup()) {
-			gpufreq_dump_infra_status();
-			mtk_common_debug_dump();
+	if (ret == SOFT_RESET_FAILED) {
+		dev_err(kbdev->dev, "Soft-reset failed");
+		goto err;
+	} else if (ret == L2_ON_FAILED) {
+		dev_err(kbdev->dev, "L2 power up failed after the soft-reset");
+		goto err;
+	} else if (ret == MCU_REINIT_FAILED) {
+#if IS_ENABLED(CONFIG_MALI_MTK_RESET_RELOAD_ON_FW)
+		dev_err(kbdev->dev, "[1]MCU re-init failed, trying reload firmware on reset worker[%d]",ret);
+		cancel_work_sync(&kbdev->csf.firmware_reload_work);
+		kbdev->pm.backend.fw_reload_on_reset_worker = true;
+		ret = kbase_csf_reset_gpu_once(kbdev, firmware_inited, true);
+		dev_err(kbdev->dev,"Reload fw on reset worker ret = [%d]",ret);
+		if (ret != RESET_SUCCESS) {
+			dev_err(kbdev->dev, "[2]MCU re-init failed trying full firmware reload[%d]",ret);
+			/* Since MCU reinit failed despite successful soft reset, we can try
+			* the firmware full reload.
+			*/
+			kbdev->csf.firmware_full_reload_needed = true;
+			kbdev->pm.backend.fw_reload_on_reset_worker = false;
+			ret = kbase_csf_reset_gpu_once(kbdev, firmware_inited, true);
+			if (ret != RESET_SUCCESS) {
+				kbdev->csf.firmware_full_reload_needed = false;
+				dev_err(kbdev->dev,
+					"[3]MCU Re-init failed even after trying full firmware reload, ret = [%d]",
+					ret);
+				goto err;
+			}
 		}
-#endif
-		return err;
-	}
-
-	mutex_lock(&kbdev->mmu_hw_mutex);
-	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
-	kbase_ctx_sched_restore_all_as(kbdev);
-	kbase_ipa_control_handle_gpu_reset_post(kbdev);
-	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
-	mutex_unlock(&kbdev->mmu_hw_mutex);
-
-	kbase_pm_enable_interrupts(kbdev);
-
-	mutex_lock(&kbdev->pm.lock);
-	kbase_pm_reset_complete(kbdev);
-	/* Synchronously wait for the reload of firmware to complete */
-	err = kbase_pm_wait_for_desired_state(kbdev);
-	mutex_unlock(&kbdev->pm.lock);
-
-	if (WARN_ON(err)) {
-		kbase_csf_hwcnt_on_reset_error(kbdev);
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
-		if (!mtk_common_gpufreq_bringup()) {
-			gpufreq_dump_infra_status();
-			mtk_common_debug_dump();
+#else
+		dev_err(kbdev->dev, "MCU re-init failed trying full firmware reload");
+		/* Since MCU reinit failed despite successful soft reset, we can try
+		 * the firmware full reload.
+		 */
+		kbdev->csf.firmware_full_reload_needed = true;
+		ret = kbase_csf_reset_gpu_once(kbdev, firmware_inited, true);
+		if (ret != RESET_SUCCESS) {
+			dev_err(kbdev->dev,
+				"MCU Re-init failed even after trying full firmware reload, ret = [%d]",
+				ret);
+			goto err;
 		}
-#endif
-		return err;
+#endif /* CONFIG_MALI_MTK_RESET_RELOAD_ON_FW */
 	}
 
 	/* Re-enable GPU hardware counters */
 	kbase_csf_scheduler_spin_lock(kbdev, &flags);
 	kbase_hwcnt_context_enable(kbdev->hwcnt_gpu_ctx);
 	kbase_csf_scheduler_spin_unlock(kbdev, flags);
-
 	if (!silent) {
-		dev_err(kbdev->dev, "Reset complete");
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
-		ged_log_buf_print2(
-			kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION | MTK_LOGBUFFER_TYPE_DEFERRED_WHEN_RESET,
 			"Reset complete\n");
-#endif
-	}
+#else /* CONFIG_MALI_MTK_LOG_BUFFER */
+		dev_err(kbdev->dev, "Reset complete");
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
 
+#if IS_ENABLED(CONFIG_MALI_MTK_MBRAIN_SUPPORT)
+		ged_mali_event_notify_gpu_reset_done();
+#endif /* CONFIG_MALI_MTK_MBRAIN_SUPPORT */
+	}
 	return 0;
+err:
+
+	kbase_csf_hwcnt_on_reset_error(kbdev);
+	return -1;
 }
 
 static void kbase_csf_reset_gpu_worker(struct work_struct *data)
 {
-	struct kbase_device *kbdev = container_of(data, struct kbase_device,
-						  csf.reset.work);
+	struct kbase_device *kbdev = container_of(data, struct kbase_device, csf.reset.work);
+	bool gpu_sleep_mode_active = false;
 	bool firmware_inited;
 	unsigned long flags;
 	int err = 0;
 	const enum kbase_csf_reset_gpu_state initial_reset_state =
 		atomic_read(&kbdev->csf.reset.state);
+	const bool silent = kbase_csf_reset_state_is_silent(initial_reset_state);
 
 	/* Ensure any threads (e.g. executing the CSF scheduler) have finished
 	 * using the HW
 	 */
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"Reset GPU Worker, start\n");
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
 	kbase_csf_reset_begin_hw_access_sync(kbdev, initial_reset_state);
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"Reset GPU Worker, hw access sync done\n");
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
 
 	spin_lock_irqsave(&kbdev->hwaccess_lock, flags);
 	firmware_inited = kbdev->csf.firmware_inited;
+	if (IS_ENABLED(CONFIG_PM))
+		gpu_sleep_mode_active = kbdev->pm.backend.gpu_sleep_mode_active;
+
 	spin_unlock_irqrestore(&kbdev->hwaccess_lock, flags);
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+		"Reset GPU Worker, gpu sleep mode status updated\n");
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
 
-	if (!kbase_pm_context_active_handle_suspend(kbdev,
-			KBASE_PM_SUSPEND_HANDLER_DONT_REACTIVATE)) {
-		bool silent =
-			kbase_csf_reset_state_is_silent(initial_reset_state);
+	if (unlikely(gpu_sleep_mode_active) && IS_ENABLED(CONFIG_PM)) {
+		/* As prior to GPU reset all on-slot groups are suspended,
+		 * need to wake up the MCU from sleep.
+		 * No pm active reference is taken here since GPU is in sleep
+		 * state and both runtime & system suspend synchronize with the
+		 * GPU reset before they wake up the GPU to suspend on-slot
+		 * groups.
+		 */
+		kbase_pm_lock(kbdev);
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"Reset GPU Worker, pm locked\n");
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
+		if (kbase_pm_force_mcu_wakeup_after_sleep(kbdev))
+			dev_warn(kbdev->dev, "Wait for MCU wake up failed on GPU reset");
+		kbase_pm_unlock(kbdev);
 
+		err = kbase_csf_reset_gpu_now(kbdev, firmware_inited, silent);
+	} else if (!kbase_pm_context_active_handle_suspend(
+			   kbdev, KBASE_PM_SUSPEND_HANDLER_DONT_REACTIVATE)) {
 		err = kbase_csf_reset_gpu_now(kbdev, firmware_inited, silent);
 		kbase_pm_context_idle(kbdev);
 	}
@@ -563,47 +804,133 @@ static void kbase_csf_reset_gpu_worker(struct work_struct *data)
 	kbase_csf_reset_end_hw_access(kbdev, err, firmware_inited);
 }
 
-bool kbase_prepare_to_reset_gpu(struct kbase_device *kbdev, unsigned int flags)
-{
-	if (flags & RESET_FLAGS_HWC_UNRECOVERABLE_ERROR)
-		kbase_hwcnt_backend_csf_on_unrecoverable_error(
-			&kbdev->hwcnt_gpu_iface);
+#if IS_ENABLED(CONFIG_MALI_MTK_GPU_RESET_DEBUG)
+char *gpu_reset_entry_name[] = {
+	// error event entry
+	"kbasep_ioctl_internal_fence_wait", //0
+	"kcpu_fence_timeout_dump", //1
+	"wait_mcu_as_inactive",//2
+	"kbase_pm_timed_out",//3
+	"handle_internal_firmware_fatal",//4
+	"kbase_csf_wait_protected_mode_enter",//5
+	"scheduler_force_protm_exit",//6
+	"halt_stream_sync",//7
+	"remove_group_from_runnable",//8
+	"term_group_sync",//9
+	"program_suspending_csg_slots",//10
+	"wait_csg_slots_start",//11
+	"wait_csg_slots_finish_prio_update",//12
+	"suspend_active_groups_on_powerdown",//13
+	"firmware_aliveness_monitor",//14
+	"handle_fatal_event",//15
+	"kbase_gpu_fault_interrupt",//16
+	"kbase_gpu_interrupt",//17
+	"kbase_mmu_report_mcu_as_fault_and_reset",//18
+	"kbase_gpueb_irq_handler",//19
+	"wait_ready",//20
+	"busy_wait_cache_operation",//21
+	"kbase_gpu_wait_cache_clean_timeout",//22
+	"apply_hw_issue_GPU2019_3901_wa",//23
+	"wait_for_mmu_fault_handling_in_gpu_poweroff_wait_wq", //24
+	"delegate_pm_domain_control_to_fw", //25
 
-	if (atomic_cmpxchg(&kbdev->csf.reset.state,
-			KBASE_CSF_RESET_GPU_NOT_PENDING,
-			KBASE_CSF_RESET_GPU_PREPARED) !=
-			KBASE_CSF_RESET_GPU_NOT_PENDING)
+	// nromal event entry
+	//"trigger_reset",
+	//"kbase_pm_set_policy",
+	//"int_id_overrides_write",
+	//"propagate_bits_write",
+};
+unsigned int gpu_reset_entry_size = sizeof(gpu_reset_entry_name)/sizeof(gpu_reset_entry_name[0]);
+#endif /* CONFIG_MALI_MTK_GPU_RESET_DEBUG */
+
+#if IS_ENABLED(CONFIG_MALI_MTK_GPU_RESET_DEBUG)
+bool __kbase_prepare_to_reset_gpu(struct kbase_device *kbdev, unsigned int flags)
+#else
+bool kbase_prepare_to_reset_gpu(struct kbase_device *kbdev, unsigned int flags)
+#endif /* CONFIG_MALI_MTK_GPU_RESET_DEBUG */
+{
+	if (kbase_io_is_aw_removed(kbdev)) {
+		/* GPU access has been removed, reset will be done by Arbiter instead */
+		return false;
+	}
+
+	if (flags & RESET_FLAGS_HWC_UNRECOVERABLE_ERROR)
+		kbase_hwcnt_backend_csf_on_unrecoverable_error(&kbdev->hwcnt_gpu_iface);
+
+	if (atomic_cmpxchg(&kbdev->csf.reset.state, KBASE_CSF_RESET_GPU_NOT_PENDING,
+			   KBASE_CSF_RESET_GPU_PREPARED) != KBASE_CSF_RESET_GPU_NOT_PENDING)
 		/* Some other thread is already resetting the GPU */
 		return false;
 
+	/* Issue the wake up of threads waiting for PM state transition.
+	 * They might want to exit the wait since GPU reset has been triggered.
+	 */
+	wake_up(&kbdev->pm.backend.gpu_in_desired_state_wait);
 	return true;
 }
+#if IS_ENABLED(CONFIG_MALI_MTK_GPU_RESET_DEBUG)
+KBASE_EXPORT_TEST_API(__kbase_prepare_to_reset_gpu);
+#else
 KBASE_EXPORT_TEST_API(kbase_prepare_to_reset_gpu);
+#endif /* CONFIG_MALI_MTK_GPU_RESET_DEBUG */
 
-bool kbase_prepare_to_reset_gpu_locked(struct kbase_device *kbdev,
-				       unsigned int flags)
+#if IS_ENABLED(CONFIG_MALI_MTK_GPU_RESET_DEBUG)
+bool kbase_prepare_to_reset_gpu_ext(struct kbase_device *kbdev, unsigned int flags, const char* file, const char* func)
 {
-	lockdep_assert_held(&kbdev->hwaccess_lock);
+	int idx = 0;
+	bool need_reset_flag = false;
+	int lock;
 
-	return kbase_prepare_to_reset_gpu(kbdev, flags);
+	need_reset_flag = __kbase_prepare_to_reset_gpu(kbdev, flags);
+
+	if (need_reset_flag && kbdev->reset_exception_mask != 0) {
+		dev_err(kbdev->dev, "gpu reset entry: %s,%s", file, func);
+		for (idx = 0; idx < gpu_reset_entry_size; idx++) {
+			if (kbdev->reset_exception_mask & (1u << idx)) {
+				if (strncmp(func, gpu_reset_entry_name[idx], strlen(func)) == 0) {
+					lock = spin_is_locked(&kbdev->hwaccess_lock);
+					// Add debug dump here
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+					mtk_common_debug(MTK_COMMON_DBG_DUMP_INFRA_STATUS, NULL, MTK_DBG_HOOK_NA);
+					mtk_common_debug(MTK_COMMON_DBG_DUMP_PM_STATUS, NULL, MTK_DBG_HOOK_NA);
+					if (lock)
+						mtk_common_debug(MTK_COMMON_DBG_CSF_DUMP_ITER_HWIF_LOCKED, NULL, MTK_DBG_HOOK_NA);
+					else
+						mtk_common_debug(MTK_COMMON_DBG_CSF_DUMP_ITER_HWIF, NULL, MTK_DBG_HOOK_NA);
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+					if (!lock) {
+#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG_DUMP)
+						kbase_csf_debug_dump_registers(kbdev, kbdev->csf.firmware_inited);
+#else
+						kbase_csf_debug_dump_registers(kbdev);
+#endif /* CONFIG_MALI_MTK_DEBUG_DUMP */
+					}
+					kbase_csf_firmware_log_dump_buffer(kbdev);
+					BUG_ON(1);
+				}
+			}
+		}
+	}
+
+	return need_reset_flag;
 }
+#endif /* CONFIG_MALI_MTK_GPU_RESET_DEBUG */
 
 void kbase_reset_gpu(struct kbase_device *kbdev)
 {
 	/* Note this is a WARN/atomic_set because it is a software issue for
 	 * a race to be occurring here
 	 */
-	if (WARN_ON(atomic_read(&kbdev->csf.reset.state) !=
-		    KBASE_RESET_GPU_PREPARED))
+	if (WARN_ON(atomic_read(&kbdev->csf.reset.state) != KBASE_RESET_GPU_PREPARED))
 		return;
 
 	atomic_set(&kbdev->csf.reset.state, KBASE_CSF_RESET_GPU_COMMITTED);
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+	mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION | MTK_LOGBUFFER_TYPE_DEFERRED_WHEN_RESET,
+		"Preparing to soft-reset GPU\n");
+#else /* CONFIG_MALI_MTK_LOG_BUFFER */
 	dev_err(kbdev->dev, "Preparing to soft-reset GPU\n");
-#if IS_ENABLED(CONFIG_MALI_MTK_DEBUG)
-		ged_log_buf_print2(
-			kbdev->ged_log_buf_hnd_kbase, GED_LOG_ATTR_TIME,
-			"Preparing to soft-reset GPU\n");
-#endif
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
 
 	kbase_disjoint_state_up(kbdev);
 
@@ -611,19 +938,11 @@ void kbase_reset_gpu(struct kbase_device *kbdev)
 }
 KBASE_EXPORT_TEST_API(kbase_reset_gpu);
 
-void kbase_reset_gpu_locked(struct kbase_device *kbdev)
-{
-	lockdep_assert_held(&kbdev->hwaccess_lock);
-
-	kbase_reset_gpu(kbdev);
-}
-
 int kbase_reset_gpu_silent(struct kbase_device *kbdev)
 {
-	if (atomic_cmpxchg(&kbdev->csf.reset.state,
-				KBASE_CSF_RESET_GPU_NOT_PENDING,
-				KBASE_CSF_RESET_GPU_COMMITTED_SILENT) !=
-				KBASE_CSF_RESET_GPU_NOT_PENDING) {
+	if (atomic_cmpxchg(&kbdev->csf.reset.state, KBASE_CSF_RESET_GPU_NOT_PENDING,
+			   KBASE_CSF_RESET_GPU_COMMITTED_SILENT) !=
+	    KBASE_CSF_RESET_GPU_NOT_PENDING) {
 		/* Some other thread is already resetting the GPU */
 		return -EAGAIN;
 	}
@@ -634,11 +953,11 @@ int kbase_reset_gpu_silent(struct kbase_device *kbdev)
 
 	return 0;
 }
+KBASE_EXPORT_TEST_API(kbase_reset_gpu_silent);
 
 bool kbase_reset_gpu_is_active(struct kbase_device *kbdev)
 {
-	enum kbase_csf_reset_gpu_state reset_state =
-		atomic_read(&kbdev->csf.reset.state);
+	enum kbase_csf_reset_gpu_state reset_state = atomic_read(&kbdev->csf.reset.state);
 
 	/* For CSF, the reset is considered active only when the reset worker
 	 * is actually executing and other threads would have to wait for it to
@@ -649,16 +968,13 @@ bool kbase_reset_gpu_is_active(struct kbase_device *kbdev)
 
 bool kbase_reset_gpu_is_not_pending(struct kbase_device *kbdev)
 {
-	enum kbase_csf_reset_gpu_state reset_state =
-		atomic_read(&kbdev->csf.reset.state);
-
-	return (reset_state != KBASE_CSF_RESET_GPU_NOT_PENDING);
+	return atomic_read(&kbdev->csf.reset.state) == KBASE_CSF_RESET_GPU_NOT_PENDING;
 }
 
 int kbase_reset_gpu_wait(struct kbase_device *kbdev)
 {
 	const long wait_timeout =
-		kbase_csf_timeout_in_jiffies(GPU_RESET_TIMEOUT_MS);
+		kbase_csf_timeout_in_jiffies(kbase_get_timeout_ms(kbdev, CSF_GPU_RESET_TIMEOUT));
 	long remaining;
 
 	/* Inform lockdep we might be trying to wait on a reset (as
@@ -676,17 +992,16 @@ int kbase_reset_gpu_wait(struct kbase_device *kbdev)
 
 	remaining = wait_event_timeout(
 		kbdev->csf.reset.wait,
-		(atomic_read(&kbdev->csf.reset.state) ==
-		 KBASE_CSF_RESET_GPU_NOT_PENDING) ||
-			(atomic_read(&kbdev->csf.reset.state) ==
-			 KBASE_CSF_RESET_GPU_FAILED),
+		(atomic_read(&kbdev->csf.reset.state) == KBASE_CSF_RESET_GPU_NOT_PENDING) ||
+			(atomic_read(&kbdev->csf.reset.state) == KBASE_CSF_RESET_GPU_FAILED),
 		wait_timeout);
 
 	if (!remaining) {
 		dev_warn(kbdev->dev, "Timed out waiting for the GPU reset to complete");
+
+
 		return -ETIMEDOUT;
-	} else if (atomic_read(&kbdev->csf.reset.state) ==
-			KBASE_CSF_RESET_GPU_FAILED) {
+	} else if (atomic_read(&kbdev->csf.reset.state) == KBASE_CSF_RESET_GPU_FAILED) {
 		return -ENOMEM;
 	}
 
@@ -694,8 +1009,58 @@ int kbase_reset_gpu_wait(struct kbase_device *kbdev)
 }
 KBASE_EXPORT_TEST_API(kbase_reset_gpu_wait);
 
+#if IS_ENABLED(CONFIG_MALI_MTK_GPUEB_IRQ)
+static irqreturn_t kbase_gpueb_irq_handler(int irq, void *data) {
+	struct kbase_device *kbdev = data;
+	unsigned int gpueb_irq_status = 0;
+
+	gpueb_irq_status = gpueb_get_mbox1_irq();
+	if (gpueb_irq_status & BIT(0)) {
+		kbdev->low_volt_count++;
+		dev_err(kbdev->dev, "kbase_gpueb_irq_handler: ++LOW_VOLT[%llu] BRCAST_TIMEOUT[%llu]",
+			kbdev->low_volt_count, kbdev->brcast_timeout_count);
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"kbase_gpueb_irq_handler: ++LOW_VOLT[%llu] BRCAST_TIMEOUT[%llu]\n",
+			kbdev->low_volt_count, kbdev->brcast_timeout_count);
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
+	} else if (gpueb_irq_status & BIT(1)) {
+		kbdev->brcast_timeout_count++;
+		dev_err(kbdev->dev, "kbase_gpueb_irq_handler: LOW_VOLT[%llu] ++BRCAST_TIMEOUT[%llu]",
+			kbdev->low_volt_count, kbdev->brcast_timeout_count);
+#if IS_ENABLED(CONFIG_MALI_MTK_LOG_BUFFER)
+		mtk_logbuffer_type_print(kbdev, MTK_LOGBUFFER_TYPE_CRITICAL | MTK_LOGBUFFER_TYPE_EXCEPTION,
+			"kbase_gpueb_irq_handler: LOW_VOLT[%llu] ++BRCAST_TIMEOUT[%llu]\n",
+			kbdev->low_volt_count, kbdev->brcast_timeout_count);
+#endif /* CONFIG_MALI_MTK_LOG_BUFFER */
+	}
+
+	if (kbase_prepare_to_reset_gpu(kbdev, RESET_FLAGS_NONE)) {
+#if IS_ENABLED(CONFIG_MALI_MTK_MBRAIN_SUPPORT)
+		ged_mali_event_update_gpu_reset_nolock(GPU_RESET_GPUEB_IRQ_NOTIFY);
+#endif /* CONFIG_MALI_MTK_MBRAIN_SUPPORT */
+		kbase_reset_gpu(kbdev);
+	}
+	else
+		dev_err(kbdev->dev, "kbase_gpueb_irq_handler: GPU is already under reset");
+
+	if (gpueb_irq_status & BIT(0))
+		gpueb_clr_mbox1_irq(BIT(0));
+	else if (gpueb_irq_status & BIT(1))
+		gpueb_clr_mbox1_irq(BIT(1));
+
+	return IRQ_HANDLED;
+}
+#endif /* CONFIG_MALI_MTK_GPUEB_IRQ */
+
 int kbase_reset_gpu_init(struct kbase_device *kbdev)
 {
+#if IS_ENABLED(CONFIG_MALI_MTK_GPUEB_IRQ)
+	int ret = -1;
+	int irq;
+	struct platform_device *pdev;
+#endif /* CONFIG_MALI_MTK_GPUEB_IRQ */
+
 	kbdev->csf.reset.workq = alloc_workqueue("Mali reset workqueue", 0, 1);
 	if (kbdev->csf.reset.workq == NULL)
 		return -ENOMEM;
@@ -705,10 +1070,44 @@ int kbase_reset_gpu_init(struct kbase_device *kbdev)
 	init_waitqueue_head(&kbdev->csf.reset.wait);
 	init_rwsem(&kbdev->csf.reset.sem);
 
+#if IS_ENABLED(CONFIG_MALI_MTK_GPUEB_IRQ)
+	kbdev->gpueb_irq = 0;
+	kbdev->low_volt_count = 0;
+	kbdev->brcast_timeout_count = 0;
+
+	pdev = to_platform_device(kbdev->dev);
+#if IS_ENABLED(CONFIG_OF)
+	irq = platform_get_irq_byname(pdev, "GPUEB_MBOX1");
+	dev_info(kbdev->dev, "get GPUEB_MBOX1 interrupt %d\n", irq);
+#else
+	irq = platform_get_irq(pdev, 5);
+	dev_info(kbdev->dev, "get mali 5 interrupt %d\n", irq);
+#endif /* CONFIG_OF */
+	if (irq <= 0) {
+		dev_err(kbdev->dev, "fail to get GPUEB_MBOX1 IRQ, err_code = %d\n", irq);
+		return -EINVAL;
+	}
+
+	kbdev->gpueb_irq = irq;
+	ret = request_irq(kbdev->gpueb_irq, kbase_gpueb_irq_handler,
+		irqd_get_trigger_type(irq_get_irq_data(kbdev->gpueb_irq)) | IRQF_SHARED,
+		dev_name(kbdev->dev), kbdev);
+
+	if (ret) {
+		dev_err(kbdev->dev, "fail to request GPUEB_MBOX1 IRQ %d, err_code = %d\n",
+			kbdev->gpueb_irq, ret);
+		return -EINVAL;
+	}
+#endif /* CONFIG_MALI_MTK_GPUEB_IRQ */
 	return 0;
 }
 
 void kbase_reset_gpu_term(struct kbase_device *kbdev)
 {
 	destroy_workqueue(kbdev->csf.reset.workq);
+
+#if IS_ENABLED(CONFIG_MALI_MTK_GPUEB_IRQ)
+	if (kbdev->gpueb_irq)
+		free_irq(kbdev->gpueb_irq, kbdev);
+#endif /* CONFIG_MALI_MTK_GPUEB_IRQ */
 }
