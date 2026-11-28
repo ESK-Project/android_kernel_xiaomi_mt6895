@@ -44,6 +44,7 @@
 #include <linux/irq_work.h>
 #include <linux/ctype.h>
 #include <linux/uio.h>
+#include <linux/xaga_marker.h>
 #include <linux/sched/clock.h>
 #include <linux/sched/debug.h>
 #include <linux/sched/task_stack.h>
@@ -2037,6 +2038,8 @@ asmlinkage int vprintk_emit(int facility, int level,
 	int printed_len;
 	bool in_sched = false;
 	unsigned long flags;
+
+	xaga_marker_early_printk(fmt, args);
 
 	/* Suppress unimportant messages after panic happens */
 	if (unlikely(suppress_printk))

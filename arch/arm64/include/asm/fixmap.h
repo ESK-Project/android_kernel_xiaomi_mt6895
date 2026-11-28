@@ -68,6 +68,10 @@ enum fixed_addresses {
 	FIX_ENTRY_TRAMP_DATA,
 #define TRAMP_VALIAS		(__fix_to_virt(FIX_ENTRY_TRAMP_TEXT1))
 #endif /* CONFIG_UNMAP_KERNEL_AT_EL0 */
+#ifdef CONFIG_XAGA_MARKER_WRITER
+	FIX_XAGA_MARKER_END,
+	FIX_XAGA_MARKER = FIX_XAGA_MARKER_END + SZ_64K / PAGE_SIZE - 1,
+#endif
 	__end_of_permanent_fixed_addresses,
 
 	/*

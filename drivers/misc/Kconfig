@@ -497,4 +497,12 @@ source "drivers/misc/cardreader/Kconfig"
 source "drivers/misc/habanalabs/Kconfig"
 source "drivers/misc/uacce/Kconfig"
 source "drivers/misc/hwid/Kconfig"
+
+config XAGA_MARKER_WRITER
+	bool "Xaga boot-stage marker writer"
+	depends on ARM64_4K_PAGES && PRINTK
+	help
+	  Mirror printk into the XAGR ring in Xaga's reserved log_store RAM.
+	  The ring can survive a watchdog reboot.
+
 endmenu
