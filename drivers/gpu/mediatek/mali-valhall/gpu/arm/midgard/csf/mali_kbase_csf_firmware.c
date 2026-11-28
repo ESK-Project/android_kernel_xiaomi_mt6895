@@ -988,13 +988,13 @@ retry_alloc:
 			num_pages_aligned, virtual_start,
 			is_small_page ? "small pages" : "large page");
 		WARN_ON(reuse_pages);
+		kfree(phys);
 		if (!is_small_page) {
 			dev_warn(kbdev->dev, "Retrying by using small pages");
 			force_small_page = true;
-			kfree(phys);
 			goto retry_alloc;
 		}
-		goto out;
+		return ret;
 	}
 
 	load_fw_image_section(kbdev, fw->data, phys, num_pages, flags, data_start, data_end);

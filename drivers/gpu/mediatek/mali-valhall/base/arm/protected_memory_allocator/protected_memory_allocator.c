@@ -823,8 +823,8 @@ static int get_gpueb_gpr_val_v1(struct platform_device *pdev, uint32_t gpr_id, u
 	struct device_node *np;
 	struct resource *res = NULL;
 	void __iomem *gpueb_base;
-	void __iomem *GPR_target;
 	uint32_t gpr_offset;
+	u64 offset;
 
 	np = pdev->dev.of_node;
 
@@ -840,12 +840,15 @@ static int get_gpueb_gpr_val_v1(struct platform_device *pdev, uint32_t gpr_id, u
 		return -ENODEV;
 	}
 
-	of_property_read_u32(np, "gpr-offset", &gpr_offset);
-
-	if(!gpr_offset) {
+	if (of_property_read_u32(np, "gpr-offset", &gpr_offset) &&
+	    of_property_read_u32(np, "gpr_offset", &gpr_offset)) {
 		dev_err(&pdev->dev, "can't have GPR offset access\n");
-		return -ENODEV;
+		return -EINVAL;
 	}
+
+	offset = gpr_offset + (u64)gpr_id * sizeof(u32);
+	if (offset + sizeof(u32) > resource_size(res))
+		return -EINVAL;
 
 	dev_info(&pdev->dev,
 		"Using on addr(base + %x, %d)\n",
@@ -856,10 +859,7 @@ static int get_gpueb_gpr_val_v1(struct platform_device *pdev, uint32_t gpr_id, u
 		dev_err(&pdev->dev, "fail to ioremap gpueb_base: 0x%llx", (unsigned long long)res->start);
 		return -ENODEV;
 	}
-	GPR_target = GPR(gpueb_base + gpr_offset, gpr_id);
-
-	/* Note GPR is 32 bits */
-	*p_GPR_target_64 = *(uint32_t*)GPR_target;
+	*p_GPR_target_64 = readl(gpueb_base + offset);
 	devm_iounmap(&pdev->dev, gpueb_base);
 
 	return 0;
@@ -914,8 +914,10 @@ static int mtk_protected_memory_allocator_probe(struct platform_device *pdev)
 	size_t rmem_size;
 	size_t alloc_bitmap_pages_arr_size;
 	uint64_t GPR_target_64;
+	u32 gpr_id, gmpu_table_size, pma_version = 1;
+	int ret;
 #endif /* CONFIG_MALI_MTK_GPU_PMA_PAGE_HEAP */
-	uint32_t gpr_id, gmpu_table_size, psize, pma_version;
+	u32 psize;
 #if IS_ENABLED(CONFIG_MALI_MTK_GPU_PMA_PAGE_HEAP_2MB)
 	struct protected_memory_allocation *pma;
 #endif /* CONFIG_MALI_MTK_GPU_PMA_PAGE_HEAP_2MB */
@@ -941,18 +943,14 @@ static int mtk_protected_memory_allocator_probe(struct platform_device *pdev)
 		dev_info(&pdev->dev, "Skip init gpu iommu\n");
 	}
 #endif /* CONFIG_MALI_MTK_GPU_IOMMU */
-	of_property_read_u32(np, "gmpu-table-size", &gmpu_table_size);
-	of_property_read_u32(np, "gpr-id", &gpr_id);
-	of_property_read_u32(np, "protected-reserve-size", &psize);
-
-	if(!psize) {
+	if ((of_property_read_u32(np, "protected-reserve-size", &psize) &&
+	     of_property_read_u32(np, "protected_reserve_size", &psize)) ||
+	    psize < PAGE_SIZE) {
 		dev_err(&pdev->dev, "can't find reserved-memory\n");
-		return -ENODEV;
+		return -EINVAL;
 	}
 
-	of_property_read_u32(np, "pma-version", &pma_version);
 #if IS_ENABLED(CONFIG_MALI_MTK_GPU_PMA_PAGE_HEAP)
-	of_node_put(np);
 	epma_dev = devm_kzalloc(&pdev->dev, sizeof(*epma_dev), GFP_KERNEL);
 	if (!epma_dev)
 		return -ENOMEM;
@@ -971,6 +969,18 @@ static int mtk_protected_memory_allocator_probe(struct platform_device *pdev)
 	if (dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(44))) //TODO DMA_BIT_MASK(kbdev->gpu_props.mmu.pa_bits), dma_set_mask_and_coherent or dma_set_mask
 		return -ENOMEM;
 #else
+	if ((of_property_read_u32(np, "gmpu-table-size", &gmpu_table_size) &&
+	     of_property_read_u32(np, "gmpu_table_size", &gmpu_table_size)) ||
+	    (of_property_read_u32(np, "gpr-id", &gpr_id) &&
+	     of_property_read_u32(np, "gpr_id", &gpr_id))) {
+		dev_err(&pdev->dev, "can't read GPUEB protected memory properties\n");
+		return -EINVAL;
+	}
+
+	ret = of_property_read_u32(np, "pma-version", &pma_version);
+	if (ret && ret != -EINVAL)
+		return ret;
+
 	if(pma_version == 2)
 	{
 		if( 0 != get_gpueb_gpr_val_v2(gpr_id, &GPR_target_64))
@@ -994,7 +1004,6 @@ static int mtk_protected_memory_allocator_probe(struct platform_device *pdev)
 		"addr=0x%llx, size=%zu pages, gmpu_table_size=+%u\n",
 		(unsigned long long)rmem_base, rmem_size, gmpu_table_size);
 
-	of_node_put(np);
 	epma_dev = devm_kzalloc(&pdev->dev, sizeof(*epma_dev), GFP_KERNEL);
 	if (!epma_dev)
 		return -ENOMEM;
