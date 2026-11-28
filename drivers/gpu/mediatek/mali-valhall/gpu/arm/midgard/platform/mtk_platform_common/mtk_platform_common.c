@@ -48,14 +48,13 @@
 #include <platform/mtk_platform_common/mtk_platform_dvfs_hint_26m_perf_cnting.h>
 #endif /* CONFIG_MALI_MTK_GPU_DVFS_HINT_26M_LOADING */
 #endif /* CONFIG_MALI_MIDGARD_DVFS && CONFIG_MALI_MTK_DVFS_POLICY */
+#endif /* CONFIG_MALI_MTK_PROC_FS */
 
 #if IS_ENABLED(CONFIG_MALI_MTK_GPU_PMU)
 #include <platform/mtk_mfg_counter.h>
 #include <mtk_ltr_pmu.h>
 #include <mtk_gpu_power_model_sspm_ipi.h>
 #endif /* CONFIG_MALI_MTK_GPU_PMU */
-
-#endif /* CONFIG_MALI_MTK_PROC_FS */
 
 /* name of the proc root dir */
 #define	PROC_ROOT "mtk_mali"

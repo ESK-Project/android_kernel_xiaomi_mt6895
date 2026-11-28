@@ -63,6 +63,7 @@ ifeq ($(CONFIG_MALI_MTK_GPU_DVFS_HINT_26M_LOADING),y)
 endif ## CONFIG_MALI_MTK_GPU_DVFS_HINT_26M_LOADING ##
 
 ifeq ($(CONFIG_MTK_GPU_SWPM_SUPPORT),y)
+    ccflags-y += -DCONFIG_MALI_MTK_GPU_PMU
     mali_kbase-y += $(curr)/mtk_gpu_power_model_sspm_ipi.o
     mali_kbase-y += $(curr)/mtk_ltr_pmu.o
     mali_kbase-y += $(curr)/mtk_mfg_counter.o
